@@ -102,8 +102,11 @@ function installCompactCompactionRenderer() {
   Object.defineProperty(prototype, compactRendererMarker, { value: true });
 }
 
-function isOpenAICodexModel(model: Model<any> | undefined): boolean {
-  return model?.provider === "openai-codex";
+function isOpenAICodexModel(model: Model<any> | undefined): model is Model<any> {
+  // Codex-compatible providers can be local/subrouter aliases while still
+  // speaking the OpenAI Responses protocol. Keep the remote compaction and
+  // checkpoint lifecycle attached to the protocol, not only the provider name.
+  return model?.provider === "openai-codex" || model?.api === "openai-codex-responses";
 }
 
 function isCodexSolModel(model: Model<any> | undefined): boolean {
@@ -611,7 +614,7 @@ export default function piCodex(pi: ExtensionAPI) {
 
   pi.on("session_before_compact", async (event, ctx) => {
     const model = ctx.model;
-    if (!model || model.provider !== "openai-codex") return;
+    if (!isOpenAICodexModel(model)) return;
 
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok || !auth.apiKey) {
@@ -705,7 +708,7 @@ export default function piCodex(pi: ExtensionAPI) {
   });
 
   pi.on("before_provider_request", (event, ctx) => {
-    if (ctx.model?.provider !== "openai-codex") return;
+    if (!isOpenAICodexModel(ctx.model)) return;
     if (fastModeEnabled && supportsCodexFastMode(ctx.model)) {
       (event.payload as Record<string, unknown>).service_tier = CODEX_FAST_SERVICE_TIER;
     }
@@ -714,7 +717,7 @@ export default function piCodex(pi: ExtensionAPI) {
   });
 
   pi.on("before_provider_headers", (event, ctx) => {
-    if (ctx.model?.provider === "openai-codex" && retryTurnState) {
+    if (isOpenAICodexModel(ctx.model) && retryTurnState) {
       event.headers["x-codex-turn-state"] = retryTurnState;
     }
   });
