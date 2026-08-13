@@ -20,7 +20,7 @@ with `/model`. To pin this release instead of following the default
 branch:
 
 ```bash
-pi install git:github.com/manaflow-ai/pi-codex@v0.1.1
+pi install git:github.com/manaflow-ai/pi-codex@v0.1.2
 ```
 
 > The unscoped `pi-codex` package on npm is an unrelated project. Install this
@@ -69,6 +69,9 @@ The native Codex package is large because it includes the platform binary.
 - Treats steering interruptions as updates to the current task for every model,
   continuing prior work unless the steering message explicitly says to stop or
   replace it.
+- Keeps the private steering instruction out of the queue, transcript, and
+  editor. Multiple queued or adjacent delivered updates collapse into one
+  expandable row, while dequeue and Escape restore the exact user text.
 - Uses the upstream freeform patch format and Lark grammar.
 - Supports add, update, move, and delete hunks.
 - Executes patches sequentially relative to other tool calls.
@@ -80,6 +83,7 @@ The native Codex package is large because it includes the platform binary.
 - Requests Codex Fast mode (`service_tier: "priority"`) for models that advertise the Fast tier, including normal turns and remote-compaction turns.
 - Renders successful `apply_patch` results as pi-native colored diffs generated from the actual before/after files.
 - Collapses the normal compaction notice to one line; `Ctrl+O` still expands its summary.
+- Shows live elapsed time in manual and automatic compaction status rows.
 - Uses a static working indicator with a once-per-second elapsed-time label
   (`Working (12s)`, `Working (1m 5s)`) instead of Pi's selection-hostile 80 ms
   spinner, while preserving the normal working row and every extension.
