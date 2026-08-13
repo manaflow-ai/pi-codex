@@ -785,6 +785,9 @@ test("swaps write tools only while a Codex model is selected", async () => {
   const defaultFastPayload: any = {};
   handlers.get("before_provider_request")?.({ payload: defaultFastPayload }, fastCtx);
   assert.equal(defaultFastPayload.service_tier, "priority");
+  assert.doesNotThrow(() => {
+    handlers.get("after_provider_response")?.({ status: 200 }, fastCtx);
+  });
 
   await commands.get("fast").handler("off", fastCtx);
   const disabledFastPayload: any = {};
