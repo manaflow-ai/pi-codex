@@ -944,9 +944,10 @@ export default function piCodex(pi: ExtensionAPI) {
 
   pi.on("after_provider_response", (event, ctx) => {
     if (!isOpenAICodexModel(ctx.model)) return;
+    const headers = event.headers ?? {};
     const state =
-      event.headers["x-codex-turn-state"] ??
-      event.headers["X-Codex-Turn-State"];
+      headers["x-codex-turn-state"] ??
+      headers["X-Codex-Turn-State"];
     if (state) turnState ??= state;
   });
 
