@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Context, Model, Usage } from "@earendil-works/pi-ai";
 import {
-  convertResponsesMessages,
-  convertResponsesTools,
-} from "@earendil-works/pi-ai/api/openai-responses-shared";
-import {
   convertToLlm,
   sessionEntryToContextMessages,
   type SessionBeforeCompactEvent,
@@ -17,6 +13,18 @@ import {
 } from "./output-truncation.ts";
 
 type CompactionMessages = SessionBeforeCompactEvent["preparation"]["messagesToSummarize"];
+
+// Pi's extension loader can resolve a package root and its subpath against
+// different installations when the caller's cwd is outside this package.
+// Resolve the shared converter from one concrete dependency tree.
+const piAiEntryUrl = import.meta.resolve("@earendil-works/pi-ai");
+const sharedResponsesUrl = new URL(
+  "./api/openai-responses-shared.js",
+  piAiEntryUrl,
+).href;
+const { convertResponsesMessages, convertResponsesTools } = await import(
+  sharedResponsesUrl
+);
 
 export const REMOTE_COMPACTION_KIND = "pi-codex-remote-compaction";
 export const REMOTE_COMPACTION_VERSION = 2;
