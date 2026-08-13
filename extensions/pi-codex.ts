@@ -753,16 +753,17 @@ export default function piCodex(pi: ExtensionAPI) {
         front[textIndex] + back[textIndex],
       ]),
     );
-    const content = event.content.map((item: any, index: number) => {
+    const content = event.content.flatMap((item: any, index: number) => {
       const limit = allocations.get(index);
-      if (limit === undefined) return item;
-      return {
+      if (limit === undefined) return [item];
+      if (limit === 0) return [];
+      return [{
         ...item,
         text: truncateCodexOutput(item.text, {
           type: policy.type,
           limit,
         }).content,
-      };
+      }];
     });
     return {
       content,

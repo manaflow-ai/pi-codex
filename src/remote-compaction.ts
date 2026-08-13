@@ -271,18 +271,24 @@ export function convertCompactionMessages(
   messages: CompactionMessages,
 ): ResponseItem[] {
   const context: Context = { messages: convertToLlm(messages) };
-  const converted = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+  const toolCallProviders = new Set(CODEX_TOOL_CALL_PROVIDERS);
+  toolCallProviders.add(model.provider);
+  for (const message of messages as readonly any[]) {
+    if (
+      message?.api === "openai-codex-responses" &&
+      typeof message.provider === "string"
+    ) {
+      toolCallProviders.add(message.provider);
+    }
+  }
+  const converted = convertResponsesMessages(model, context, toolCallProviders, {
     includeSystemPrompt: false,
     grammarToolInputProperties: new Map([["apply_patch", "patch"]]),
   }) as unknown as ResponseItem[];
   return converted.map((item) => {
-    if (
-      item.type !== "custom_tool_call" ||
-      typeof item.id !== "string" ||
-      item.id.startsWith("ctc_")
-    ) {
-      return item;
-    }
+    if (item.type !== "custom_tool_call") return item;
+    if (typeof item.id === "string" && item.id.startsWith("ctc_")) return item;
+    if (!Object.hasOwn(item, "id")) return item;
 
     // A call created before grammar tools used an fc_* function item ID. Pi's
     // shared converter correctly changes its replay type to custom_tool_call,
