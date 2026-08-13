@@ -590,6 +590,36 @@ test("standalone web search executes through the subrouter and renders as a Pi t
       renderedResult.render(120).join("\n"),
       /Search result with source https:\/\/example\.com/,
     );
+
+    const oversized = "x".repeat(60_000);
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ output: oversized }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const oversizedResult = await webSearch.execute(
+      "search-2",
+      { search_query: [{ q: "large result" }] },
+      new AbortController().signal,
+      undefined,
+      {
+        model,
+        modelRegistry: {
+          getApiKeyAndHeaders: async () => ({ ok: true, apiKey: token }),
+          getProviderAuth: async () => ({
+            auth: { baseUrl: "http://subrouter.test/backend-api" },
+          }),
+        },
+        sessionManager: {
+          getSessionId: () => "session-render",
+          getBranch: () => [],
+        },
+      },
+    );
+    assert.ok(
+      Buffer.byteLength(oversizedResult.details.rawOutput, "utf8") <= 50_000,
+      "persisted inspection output stays bounded",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
