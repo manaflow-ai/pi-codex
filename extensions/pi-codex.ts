@@ -330,6 +330,10 @@ export default function piCodex(pi: ExtensionAPI) {
   const toolContracts = new ToolContractRegistry();
   let activeToolCatalogFingerprint = "";
 
+  // Codex's model_visible_specs() contains direct tools only. Deferred
+  // contracts stay registered for Pi's tool-search lifecycle and are included
+  // in the catalog fingerprint, but must not be sent in the initial
+  // compaction request.
   function activeCodexToolSpecs(includeDeferred = false) {
     return pi
       .getAllTools()

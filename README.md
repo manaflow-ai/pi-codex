@@ -133,8 +133,10 @@ Remote compaction is intentionally limited to the `openai-codex` provider. Other
 
 The package targets Pi 0.84 APIs. It does not attempt to reproduce Codex's
 subagent tool surface yet. First-class namespace routing, model-owned tool
-search dispatch, and provider response continuation remain Pi core concerns;
-the package keeps their metadata compatible without replacing Pi's lifecycle.
+search dispatch, and provider response continuation remain Pi core concerns.
+Deferred contracts therefore stay out of the initial model-visible tool list,
+matching Codex's `model_visible_specs()` projection, while their schemas remain
+available to the tool-search lifecycle and checkpoint fingerprint.
 
 ## Fast mode
 
