@@ -716,7 +716,12 @@ test("swaps write tools only while a Codex model is selected", async () => {
     },
     { model: { provider: "openai-codex", id: "gpt-5.6-sol" } },
   );
+  assert.equal(multipartResult.content.length, 3);
+  assert.equal(multipartResult.content[0].type, "text");
+  assert.match(multipartResult.content[0].text, /HEAD-/);
   assert.equal(multipartResult.content[1].type, "image");
+  assert.equal(multipartResult.content[2].type, "text");
+  assert.match(multipartResult.content[2].text, /-TAIL/);
   assert.deepEqual(multipartResult.details, { raw: true });
 
   await handlers.get("session_start")?.({}, {
@@ -824,6 +829,43 @@ test("resolves the same Responses endpoint as current OpenAI Codex compaction v2
     resolveCompactUrl("https://chatgpt.com/backend-api"),
     "https://chatgpt.com/backend-api/codex/responses",
   );
+});
+
+test("remote compaction requires a provider that declares the capability", async () => {
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const pi = {
+    registerCommand() {},
+    registerTool() {},
+    appendEntry() {},
+    getActiveTools: () => [],
+    getAllTools: () => [],
+    setActiveTools() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  } as unknown as ExtensionAPI;
+  piCodex(pi);
+
+  let authRequested = false;
+  const result = await handlers.get("session_before_compact")?.({
+    preparation: {},
+    signal: new AbortController().signal,
+  }, {
+    model: {
+      id: "local-codex",
+      provider: "local-responses",
+      api: "openai-codex-responses",
+    },
+    modelRegistry: {
+      async getApiKeyAndHeaders() {
+        authRequested = true;
+        return { ok: false, error: "remote compaction should not run" };
+      },
+    },
+  });
+
+  assert.equal(result, undefined);
+  assert.equal(authRequested, false);
 });
 
 test("remote compaction persists and reinstalls Codex replacement history", async () => {
@@ -1170,6 +1212,26 @@ test("replacement history retains bounded assistant and oversized text messages"
     Math.ceil(Buffer.byteLength(JSON.stringify(retained[0]), "utf8") / 4) <=
       64_000,
   );
+
+  const multipart = {
+    type: "message",
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: "x".repeat(300_000),
+    }, {
+      type: "input_text",
+      text: "later text",
+    }],
+  };
+  const multipartRetained = buildReplacementHistory(
+    [multipart, { type: "compaction_trigger" }],
+    compacted,
+  );
+  assert.ok(Array.isArray(multipartRetained[0].content));
+  assert.ok((multipartRetained[0].content as any[]).every(
+    (item) => item.type !== "input_text" || typeof item.text === "string",
+  ));
 });
 
 test("replacement history does not let non-text content bypass its budget", () => {
