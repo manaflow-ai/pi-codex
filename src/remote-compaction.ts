@@ -263,10 +263,28 @@ export function convertCompactionMessages(
   messages: CompactionMessages,
 ): ResponseItem[] {
   const context: Context = { messages: convertToLlm(messages) };
-  return convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+  const converted = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
     includeSystemPrompt: false,
     grammarToolInputProperties: new Map([["apply_patch", "patch"]]),
   }) as unknown as ResponseItem[];
+  return converted.map((item) => {
+    if (
+      item.type !== "custom_tool_call" ||
+      typeof item.id !== "string" ||
+      item.id.startsWith("ctc_")
+    ) {
+      return item;
+    }
+
+    // A call created before grammar tools used an fc_* function item ID. Pi's
+    // shared converter correctly changes its replay type to custom_tool_call,
+    // but Codex then requires a ctc_* ID. Omit the incompatible item ID rather
+    // than inventing one: call_id still pairs the output, while a fabricated ID
+    // could claim a nonexistent server-side reasoning association.
+    const sanitized = { ...item };
+    delete sanitized.id;
+    return sanitized;
+  });
 }
 
 export function buildCompactRequest(options: {
