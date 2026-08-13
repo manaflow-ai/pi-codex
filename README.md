@@ -70,6 +70,10 @@ The native Codex package is large because it includes the platform binary.
   continuing prior work unless the steering message explicitly says to stop or
   replace it.
 - Uses the upstream freeform patch format and Lark grammar.
+- Keeps each registered tool's TypeBox schema, exposure, execution mode,
+  capabilities, and output budget in one Codex tool contract. Remote
+  compaction sends the same direct model-visible schema projection as the
+  active Pi tools, while preserving deferred-loading metadata for discovery.
 - Supports add, update, move, and delete hunks.
 - Executes patches sequentially relative to other tool calls.
 - Respects tool selection: if `apply_patch` was excluded initially, `edit` and `write` are not replaced.
@@ -77,6 +81,9 @@ The native Codex package is large because it includes the platform binary.
 - Enables Codex's standalone live `web_search` tool for the `openai-codex` provider and renders its calls and results as normal Pi tool rows.
 - Sends standalone search to the resolved Codex `/alpha/search` endpoint, preserving provider base URL and header overrides, including cmux subrouters.
 - Uses current Codex remote compaction V2 for the `openai-codex` provider.
+- Applies Codex's model-facing middle-output truncation policy to package
+  tools and the `tool_result` boundary, while retaining raw search output and
+  patch details for rendering and inspection.
 - Requests Codex Fast mode (`service_tier: "priority"`) for models that advertise the Fast tier, including normal turns and remote-compaction turns.
 - Renders successful `apply_patch` results as pi-native colored diffs generated from the actual before/after files.
 - Collapses the normal compaction notice to one line; `Ctrl+O` still expands its summary.
@@ -110,13 +117,23 @@ Current OpenAI Codex enables `RemoteCompactionV2` by default. `pi-codex` mirrors
 2. Appends `{ "type": "compaction_trigger" }` to the Responses input.
 3. Requires exactly one `{ "type": "compaction" }` output item.
 4. Persists the opaque replacement history in pi's compaction entry and reinstalls it verbatim in later Codex requests, including after resume.
-5. Replays `x-codex-turn-state` for an immediate overflow retry.
+5. Stores the response ID, token usage, tool-catalog fingerprint, and checkpoint
+   version with the replacement history. A v2 checkpoint is replayed only when
+   its marker and active tool catalog still match; legacy v1 entries remain
+   readable.
+6. Replays `x-codex-turn-state` only within the active Pi turn, including an
+   immediate overflow retry.
 
 For every model under the `openai-codex` provider, `pi-codex` matches Codex's default automatic-compaction boundary at 90% of that model's context window. For example, the live 272,000-token models compact beginning at 244,800 tokens, while the 128,000-token Spark model begins at 115,200. Internally the pi reserve includes one extra token because pi's comparison is `>` while Codex's is `>=`. The override is in-memory, applies only while an `openai-codex` model is selected, preserves an explicit `compaction.enabled: false`, and does not rewrite `settings.json` or affect other providers.
 
 The older `/codex/responses/compact` endpoint remains in Codex for the legacy implementation, but it is not the default in the inspected upstream revision. There is no additional compaction-specific subrouter path: both normal and compaction V2 traffic use the resolved base URL's `/backend-api/codex/responses` route.
 
 Remote compaction is intentionally limited to the `openai-codex` provider. Other providers retain pi's normal local summary compaction.
+
+The package targets Pi 0.84 APIs. It does not attempt to reproduce Codex's
+subagent tool surface yet. First-class namespace routing, model-owned tool
+search dispatch, and provider response continuation remain Pi core concerns;
+the package keeps their metadata compatible without replacing Pi's lifecycle.
 
 ## Fast mode
 

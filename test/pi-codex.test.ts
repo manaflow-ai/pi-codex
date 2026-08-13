@@ -49,9 +49,28 @@ import {
   resolveCodexExecutable,
 } from "../src/codex-binary.ts";
 import {
+  buildReplacementHistory,
+  buildCompactRequest,
   checkpointMarker,
+  fingerprintCheckpointInput,
+  installRemoteCheckpoint,
+  isRemoteCompactionDetails,
+  parseRemoteCompactionSse,
   resolveCompactUrl,
 } from "../src/remote-compaction.ts";
+import {
+  CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
+  formatCodexTruncatedOutput,
+  truncateCodexText,
+  truncateCodexOutput,
+} from "../src/output-truncation.ts";
+import {
+  ToolContractRegistry,
+  createToolContract,
+  fingerprintToolCatalog,
+} from "../src/tool-contract.ts";
+import { Type } from "typebox";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   buildWebSearchHeaders,
   resolveWebSearchUrl,
@@ -396,7 +415,11 @@ test("recognizes Codex models", () => {
   assert.equal(isCodexModel({ provider: "openai-codex", id: "gpt-5.6-sol" } as never), true);
   assert.equal(isCodexModel({ provider: "openai", id: "gpt-5.3-codex" } as never), true);
   assert.equal(
-    isCodexModel({ provider: "subrouter", id: "gpt-5.6-sol", api: "openai-codex-responses" } as never),
+    isCodexModel({
+      provider: "subrouter",
+      id: "gpt-5.6-sol",
+      api: "openai-codex-responses",
+    } as never),
     true,
   );
   assert.equal(isCodexModel({ provider: "openai", id: "gpt-5.4" } as never), false);
@@ -799,7 +822,19 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
     requestedInit = init;
     const sse = [
       `data: ${JSON.stringify({ type: "response.output_item.done", item: replacement[0] })}`,
-      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact" } })}`,
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp-compact",
+          usage: {
+            input_tokens: 120,
+            output_tokens: 30,
+            total_tokens: 150,
+            input_tokens_details: { cached_tokens: 20, cache_write_tokens: 10 },
+            output_tokens_details: { reasoning_tokens: 12 },
+          },
+        },
+      })}`,
       "data: [DONE]",
       "",
     ].join("\n");
@@ -854,10 +889,21 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
     assert.deepEqual(body.input.at(-1), { type: "compaction_trigger" });
 
     const compaction = result.compaction;
+    assert.equal(compaction.usage.input, 90);
+    assert.equal(compaction.usage.output, 30);
+    assert.equal(compaction.usage.cacheRead, 20);
+    assert.equal(compaction.usage.cacheWrite, 10);
+    assert.equal(compaction.usage.reasoning, 12);
     assert.equal(compaction.details.output.at(-1).encrypted_content, "opaque-checkpoint");
     branch.push({ type: "compaction", details: compaction.details });
     const providerPayload: any = {
-      input: [{ role: "user", content: [{ type: "input_text", text: checkpointMarker(compaction.details.checkpointId) }] }],
+      input: [{
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: checkpointMarker(compaction.details.checkpointId),
+        }],
+      }],
     };
     handlers.get("before_provider_request")?.({ payload: providerPayload }, ctx);
     assert.equal(providerPayload.service_tier, "priority");
@@ -865,6 +911,153 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("tool contracts preserve TypeBox schemas and Codex exposure metadata", () => {
+  const schema = Type.Object({ value: Type.String() });
+  const definition: ToolDefinition<typeof schema> = {
+    name: "contract_test",
+    label: "Contract Test",
+    description: "Test tool",
+    parameters: schema,
+    async execute() {
+      return { content: [{ type: "text" as const, text: "ok" }], details: undefined };
+    },
+  };
+  const direct = createToolContract(definition, {
+    exposure: "direct",
+    namespace: "test",
+    search: { keywords: ["example"] },
+    schemaVersion: "7",
+    capabilities: ["test"],
+    outputBudgetBytes: 123,
+  });
+  const deferred = direct.toCodexTool("deferred");
+  assert.equal(deferred?.defer_loading, true);
+  assert.equal(direct.isDirect(), true);
+  assert.equal(direct.isAvailableInCodeMode(), true);
+  const modelOnly = createToolContract(definition, {
+    exposure: "direct_model_only",
+  });
+  assert.equal(modelOnly.isDirect(), true);
+  assert.equal(modelOnly.isAvailableInCodeMode(), false);
+  assert.equal(modelOnly.toCodexTool()?.defer_loading, undefined);
+  assert.equal(direct.parameters, definition.parameters);
+  assert.equal(direct.snapshot().schemaVersion, "7");
+  assert.equal(direct.snapshot().outputBudgetBytes, 123);
+  assert.equal(direct.schemaHash.length, 64);
+  assert.equal(direct.toCodexTool("hidden"), undefined);
+
+  const registry = new ToolContractRegistry();
+  registry.register(definition, { exposure: "deferred" });
+  assert.deepEqual(registry.toCodexTools(), []);
+  assert.equal(registry.toCodexTools({ includeDeferred: true })[0].defer_loading, true);
+  assert.equal(fingerprintToolCatalog(registry.values()), registry.fingerprint());
+  assert.throws(
+    () => registry.register(definition),
+    /already registered/,
+  );
+});
+
+test("Codex output truncation is model-facing only and preserves both ends", () => {
+  const input = `HEAD-${"x".repeat(20_000)}-TAIL`;
+  const result = truncateCodexOutput(input);
+  assert.equal(CODEX_DEFAULT_OUTPUT_BUDGET_BYTES, 10_000);
+  assert.equal(result.truncated, true);
+  assert.match(result.content, /Warning: truncated output/);
+  assert.match(result.content, /Total output lines: 1/);
+  assert.match(result.content, /HEAD-/);
+  assert.match(result.content, /-TAIL$/);
+  assert.match(result.content, /chars truncated/);
+  assert.equal(truncateCodexOutput("short").content, "short");
+  assert.equal(
+    truncateCodexText("0123456789", { type: "bytes", limit: 4 }),
+    "01…6 chars truncated…89",
+  );
+  assert.match(
+    formatCodexTruncatedOutput("a\n", { type: "bytes", limit: 1 }).content,
+    /Total output lines: 1/,
+  );
+  const unicode = truncateCodexOutput("🙂".repeat(20), 10);
+  assert.equal(unicode.truncated, true);
+  assert.doesNotThrow(() => JSON.stringify(unicode.content));
+});
+
+test("compaction preserves Codex tool wire modalities and deferred exposure", () => {
+  const schema = Type.Object({ query: Type.String() });
+  const body = buildCompactRequest({
+    model: {
+      id: "gpt-5.6-sol",
+      compat: { supportsStrictMode: true, supportsOpenAIGrammarTools: false },
+      thinkingLevelMap: {},
+      input: ["text"],
+    } as never,
+    messages: [] as never,
+    instructions: "system",
+    tools: [
+      {
+        name: "deferred_search",
+        description: "Search",
+        parameters: schema,
+        defer_loading: true,
+      },
+    ],
+  });
+  assert.equal((body.tools as any[])[0].type, "function");
+  assert.equal((body.tools as any[])[0].defer_loading, true);
+  assert.equal((body.tools as any[])[0].strict, null);
+});
+
+test("remote compaction checkpoints parse, replay, and safely ignore stale input", () => {
+  const compacted = { type: "compaction", encrypted_content: "opaque" };
+  const parsed = parseRemoteCompactionSse([
+    `data: ${JSON.stringify({ type: "response.output_item.done", item: compacted })}`,
+    `data: ${JSON.stringify({ type: "response.completed", response: { id: "response-1" } })}`,
+  ].join("\n"));
+  assert.deepEqual(parsed, { compaction: compacted, responseId: "response-1" });
+  const checkpointInput = [
+    { role: "user", content: [{ type: "input_text", text: checkpointMarker("cp-1") }] },
+  ];
+  const details = {
+    type: "pi-codex-remote-compaction" as const,
+    version: 2 as const,
+    checkpointId: "cp-1",
+    endpoint: "https://example.test",
+    output: [compacted],
+    readFiles: [],
+    modifiedFiles: [],
+    toolCatalogFingerprint: "catalog-1",
+    contextFingerprint: fingerprintCheckpointInput(
+      checkpointInput,
+      checkpointMarker("cp-1"),
+    ),
+  };
+  assert.equal(isRemoteCompactionDetails(details), true);
+  assert.equal(
+    isRemoteCompactionDetails({ ...details, version: 1 }),
+    true,
+    "legacy Subrouter checkpoints remain readable",
+  );
+  const payload: any = { input: checkpointInput };
+  installRemoteCheckpoint(payload, details, {
+    toolCatalogFingerprint: "catalog-1",
+    contextFingerprint: fingerprintCheckpointInput(payload.input, checkpointMarker("cp-1")),
+  });
+  assert.deepEqual(payload.input, details.output);
+  const stale: any = {
+    input: [{ role: "user", content: [{ type: "input_text", text: checkpointMarker("cp-1") }] }],
+  };
+  installRemoteCheckpoint(stale, details, { toolCatalogFingerprint: "catalog-2" });
+  assert.match(JSON.stringify(stale), /cp-1/);
+  const unrelated: any = { input: [{ role: "user", content: "new request" }] };
+  installRemoteCheckpoint(unrelated, details);
+  assert.deepEqual(unrelated.input, [{ role: "user", content: "new request" }]);
+
+  const retained = buildReplacementHistory(
+    [{ role: "user", content: "first" }, { role: "assistant", content: "answer" }, { type: "function_call", role: "assistant" }, { type: "compaction_trigger" }],
+    compacted,
+  );
+  assert.deepEqual(retained.map((item) => item.content ?? item.type), ["first", "compaction"]);
 });
 
 test("official Codex binary applies add and update hunks", async () => {

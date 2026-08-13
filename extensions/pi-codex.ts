@@ -7,6 +7,7 @@ import { StringEnum, type Model } from "@earendil-works/pi-ai";
 import {
   renderDiff,
   SettingsManager,
+  type ToolDefinition,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -20,10 +21,14 @@ import {
   buildCompactRequest,
   buildReplacementHistory,
   checkpointMarker,
+  convertCodexTools,
   fetchRemoteCompaction,
+  fingerprintCheckpointInput,
   installRemoteCheckpoint,
   isRemoteCompactionDetails,
   parseRemoteCompactionSse,
+  REMOTE_COMPACTION_VERSION,
+  toPiUsage,
   type RemoteCompactionDetails,
   resolveCompactUrl,
 } from "../src/remote-compaction.ts";
@@ -35,6 +40,15 @@ import {
   type WebSearchCommands,
   type WebSearchDetails,
 } from "../src/web-search.ts";
+import {
+  ToolContractRegistry,
+  fingerprintToolSpecs,
+} from "../src/tool-contract.ts";
+import {
+  CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
+  resolveCodexTruncationPolicy,
+  truncateCodexOutput,
+} from "../src/output-truncation.ts";
 
 const grammarPath = fileURLToPath(new URL("../src/apply-patch.lark", import.meta.url));
 const applyPatchGrammar = readFileSync(grammarPath, "utf8");
@@ -238,11 +252,11 @@ type ApplyPatchDetails = {
 };
 
 function isCodexModel(model: Model<any> | undefined): boolean {
-  // Tool selection follows the wire protocol first, just like remote
-  // compaction. Subrouter and other aliases may not contain "codex" in either
-  // their provider or model id even though they support Codex freeform tools.
+  // Tool selection follows the wire protocol first. A subrouter alias may
+  // expose the Codex Responses API without containing "codex" in its name.
   const modelId = model?.id ?? "";
-  return isOpenAICodexModel(model) || /(?:^|[-_.])codex(?:$|[-_.])/.test(modelId);
+  return isOpenAICodexModel(model) ||
+    /(?:^|[-_.])codex(?:$|[-_.])/.test(modelId);
 }
 
 function changedPathsFromOutput(output: string): string[] {
@@ -306,10 +320,52 @@ export default function piCodex(pi: ExtensionAPI) {
   let applyPatchSelected: boolean | undefined;
   let webSearchSelected: boolean | undefined;
   let retryTurnState: string | undefined;
+  let turnState: string | undefined;
   let fastModeEnabled = true;
   let workingStartedAt: number | undefined;
   let workingTimer: ReturnType<typeof setInterval> | undefined;
   const removedForCodex = new Set<string>();
+  const toolContracts = new ToolContractRegistry();
+  let activeToolCatalogFingerprint = "";
+
+  function activeCodexToolSpecs() {
+    return pi
+      .getAllTools()
+      .filter((tool) => pi.getActiveTools().includes(tool.name))
+      .flatMap((tool) => {
+        const contract = toolContracts.get(tool.name);
+        if (contract && !contract.isDirect()) return [];
+        const contractTool = contract?.toCodexTool();
+        return [contractTool ?? {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+          ...((tool as any).constrainedSampling
+            ? { constrainedSampling: (tool as any).constrainedSampling }
+            : {}),
+        }];
+      });
+  }
+
+  function activeCodexToolFingerprint(model: Model<any> | undefined): string {
+    const tools = activeCodexToolSpecs();
+    return fingerprintToolSpecs([
+      ...(model ? convertCodexTools(model, tools) ?? tools : tools),
+      {
+        name: "__pi_codex_model_compat__",
+        api: model?.api,
+        supportsStrictMode: (model?.compat as any)?.supportsStrictMode,
+        supportsOpenAIGrammarTools: (model?.compat as any)?.supportsOpenAIGrammarTools,
+        supportsToolSearch: (model?.compat as any)?.supportsToolSearch,
+      },
+    ]);
+  }
+
+  function outputPolicy(model: Model<any> | undefined, budget: number) {
+    return budget === CODEX_DEFAULT_OUTPUT_BUDGET_BYTES
+      ? resolveCodexTruncationPolicy(model)
+      : { type: "bytes" as const, limit: budget };
+  }
 
   function latestRemoteCompaction(ctx: { sessionManager: { getBranch(): readonly any[] } }) {
     return [...ctx.sessionManager.getBranch()]
@@ -429,7 +485,7 @@ export default function piCodex(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  const webSearchDefinition: ToolDefinition<typeof webSearchSchema> = {
     name: "web_search",
     label: "Web Search",
     description:
@@ -456,17 +512,22 @@ export default function piCodex(pi: ExtensionAPI) {
         endpoint,
         token: auth.apiKey,
         model,
-        authHeaders: auth.headers,
+        authHeaders: auth.headers as Record<string, string | null> | undefined,
         commands: commands as WebSearchCommands,
         sessionId: ctx.sessionManager.getSessionId(),
         input,
         signal,
       });
+      const modelOutput = truncateCodexOutput(
+        result.text,
+        outputPolicy(model, webSearchContract.outputBudgetBytes),
+      );
       return {
-        content: [{ type: "text", text: result.text }],
+        content: [{ type: "text", text: modelOutput.content }],
         details: {
           commands,
           endpoint,
+          rawOutput: result.text,
           results: result.response.results,
         } satisfies WebSearchDetails,
       };
@@ -480,16 +541,29 @@ export default function piCodex(pi: ExtensionAPI) {
       );
     },
     renderResult(result, { expanded }, theme, { isError }) {
-      const output = result.content
-        .map((item) => (item.type === "text" ? item.text : ""))
-        .join("\n");
+      const rawOutput = (result.details as WebSearchDetails | undefined)?.rawOutput;
+      const output =
+        expanded && rawOutput
+          ? rawOutput
+          : result.content
+              .map((item) => (item.type === "text" ? item.text : ""))
+              .join("\n");
       const visible =
         expanded || output.length <= 2_000 ? output : `${output.slice(0, 2_000).trimEnd()}\n…`;
       return new Text(theme.fg(isError ? "error" : "toolOutput", visible), 0, 0);
     },
+  };
+  const webSearchContract = toolContracts.register(webSearchDefinition, {
+    exposure: "direct",
+    namespace: "web",
+    search: { namespace: "web", keywords: ["browse", "search", "current information"] },
+    schemaVersion: "1",
+    capabilities: ["network", "external_context"],
+    outputBudgetBytes: CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
   });
+  pi.registerTool(webSearchContract.definition);
 
-  pi.registerTool({
+  const applyPatchDefinition: ToolDefinition<typeof applyPatchSchema> = {
     name: "apply_patch",
     label: "Apply Patch",
     description:
@@ -522,9 +596,16 @@ export default function piCodex(pi: ExtensionAPI) {
       const output = [result.stdout.trimEnd(), result.stderr.trimEnd()]
         .filter(Boolean)
         .join("\n");
+      const rawModelOutput = result.code === 0
+        ? output || "Patch applied successfully."
+        : output || `Codex apply_patch exited with status ${result.code}`;
+      const modelOutput = truncateCodexOutput(
+        rawModelOutput,
+        outputPolicy(ctx.model, applyPatchContract.outputBudgetBytes),
+      );
 
       if (result.code !== 0) {
-        throw new Error(output || `Codex apply_patch exited with status ${result.code}`);
+        throw new Error(modelOutput.content);
       }
 
       const changedPaths = changedPathsFromOutput(result.stdout);
@@ -541,7 +622,7 @@ export default function piCodex(pi: ExtensionAPI) {
       ).filter((diff): diff is { path: string; diff: string } => diff !== undefined);
 
       return {
-        content: [{ type: "text", text: output || "Patch applied successfully." }],
+        content: [{ type: "text", text: modelOutput.content }],
         details: {
           patch,
           output,
@@ -578,6 +659,39 @@ export default function piCodex(pi: ExtensionAPI) {
         : result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
       return new Text(theme.fg(isError ? "error" : "success", text), 0, 0);
     },
+  };
+  const applyPatchContract = toolContracts.register(applyPatchDefinition, {
+    exposure: "direct",
+    namespace: "coding",
+    search: { namespace: "coding", keywords: ["edit", "write", "patch", "files"] },
+    schemaVersion: "1",
+    capabilities: ["filesystem", "mutation"],
+    parallelism: "sequential",
+    outputBudgetBytes: CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
+  });
+  pi.registerTool(applyPatchContract.definition);
+
+  // Codex applies one model-facing output policy to every tool executor. Pi
+  // exposes this as a post-execution hook, so package-owned tools can retain
+  // their raw details while built-in and third-party tools receive the same
+  // middle truncation before their result enters the next model request.
+  pi.on("tool_result", (event, ctx) => {
+    if (!isOpenAICodexModel(ctx.model)) return;
+    if (toolContracts.get(event.toolName)) return;
+    const text = event.content
+      .filter((item: any) => item.type === "text")
+      .map((item: any) => item.text)
+      .join("\n");
+    if (!text) return;
+    const truncated = truncateCodexOutput(text, resolveCodexTruncationPolicy(ctx.model));
+    if (!truncated.truncated) return;
+    const nonText = event.content.filter((item: any) => item.type !== "text");
+    return {
+      content: [{ type: "text", text: truncated.content }, ...nonText],
+      details: event.details,
+      isError: event.isError,
+      usage: event.usage,
+    };
   });
 
   // Steering is model-independent. Make an interruption additive by default
@@ -633,6 +747,7 @@ export default function piCodex(pi: ExtensionAPI) {
     ];
     const endpoint = resolveCompactUrl(providerAuth?.auth.baseUrl ?? model.baseUrl);
     const checkpointId = randomUUID();
+    activeToolCatalogFingerprint = activeCodexToolFingerprint(model);
     const body = buildCompactRequest({
       model,
       messages,
@@ -645,29 +760,14 @@ export default function piCodex(pi: ExtensionAPI) {
         fastModeEnabled && supportsCodexFastMode(model)
           ? CODEX_FAST_SERVICE_TIER
           : undefined,
-      tools: pi
-        .getAllTools()
-        .filter((tool) => pi.getActiveTools().includes(tool.name))
-        .map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-          ...(tool.name === "apply_patch"
-            ? {
-                constrainedSampling: {
-                  type: "grammar" as const,
-                  variants: { openai_lark: applyPatchGrammar },
-                },
-              }
-            : {}),
-        })),
+      tools: activeCodexToolSpecs(),
     });
     const { response, text: responseText } = await fetchRemoteCompaction(endpoint, {
       method: "POST",
       headers: buildCompactHeaders(
         auth.apiKey,
-        model.headers as Record<string, string> | undefined,
-        auth.headers,
+        model.headers as Record<string, string | null> | undefined,
+        auth.headers as Record<string, string | null> | undefined,
       ),
       body: JSON.stringify(body),
       signal: event.signal,
@@ -678,7 +778,8 @@ export default function piCodex(pi: ExtensionAPI) {
       );
     }
 
-    const { compaction } = parseRemoteCompactionSse(responseText);
+    const parsedCompaction = parseRemoteCompactionSse(responseText);
+    const { compaction } = parsedCompaction;
     const output = buildReplacementHistory(body.input, compaction);
 
     const modifiedFiles = new Set([
@@ -690,22 +791,35 @@ export default function piCodex(pi: ExtensionAPI) {
     );
     const details: RemoteCompactionDetails = {
       type: "pi-codex-remote-compaction",
-      version: 1,
+      version: REMOTE_COMPACTION_VERSION,
       checkpointId,
       endpoint,
       output: output as Record<string, unknown>[],
       readFiles,
       modifiedFiles: [...modifiedFiles],
+      responseId: parsedCompaction.responseId,
+      turnState:
+        response.headers.get("x-codex-turn-state") ??
+        parsedCompaction.turnState,
+      toolCatalogFingerprint: activeToolCatalogFingerprint,
+      contextFingerprint: fingerprintCheckpointInput(body.input),
+      retainedHistoryVersion: "codex-responses-v2",
+      tokenUsage: parsedCompaction.tokenUsage,
     };
-    retryTurnState = event.willRetry
-      ? response.headers.get("x-codex-turn-state") ?? undefined
-      : undefined;
+    const responseTurnState =
+      response.headers.get("x-codex-turn-state") ??
+      parsedCompaction.turnState;
+    if (responseTurnState) turnState = responseTurnState;
+    retryTurnState = event.willRetry ? responseTurnState : undefined;
 
     return {
       compaction: {
         summary: checkpointMarker(checkpointId),
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
+        ...(parsedCompaction.tokenUsage
+          ? { usage: toPiUsage(parsedCompaction.tokenUsage) }
+          : {}),
         details,
       },
     };
@@ -717,17 +831,38 @@ export default function piCodex(pi: ExtensionAPI) {
       (event.payload as Record<string, unknown>).service_tier = CODEX_FAST_SERVICE_TIER;
     }
     const details = latestRemoteCompaction(ctx);
-    if (details) return installRemoteCheckpoint(event.payload, details);
+    if (details) {
+      const currentToolCatalogFingerprint = activeCodexToolFingerprint(ctx.model);
+      return installRemoteCheckpoint(event.payload, details, {
+        toolCatalogFingerprint: currentToolCatalogFingerprint,
+      });
+    }
   });
 
   pi.on("before_provider_headers", (event, ctx) => {
-    if (isOpenAICodexModel(ctx.model) && retryTurnState) {
-      event.headers["x-codex-turn-state"] = retryTurnState;
-    }
+    if (!isOpenAICodexModel(ctx.model)) return;
+    const state = retryTurnState ?? turnState;
+    if (state) event.headers["x-codex-turn-state"] = state;
+  });
+
+  pi.on("after_provider_response", (event, ctx) => {
+    if (!isOpenAICodexModel(ctx.model)) return;
+    const state =
+      event.headers["x-codex-turn-state"] ??
+      event.headers["X-Codex-Turn-State"];
+    if (state) turnState ??= state;
   });
 
   pi.on("agent_end", () => {
     retryTurnState = undefined;
+  });
+  pi.on("turn_start", () => {
+    retryTurnState = undefined;
+    turnState = undefined;
+  });
+  pi.on("turn_end", () => {
+    retryTurnState = undefined;
+    turnState = undefined;
   });
   pi.on("agent_start", (_event, ctx) => {
     startWorkingTicker(ctx);
@@ -736,6 +871,8 @@ export default function piCodex(pi: ExtensionAPI) {
     stopWorkingTicker(ctx);
   });
   pi.on("session_start", (_event, ctx) => {
+    retryTurnState = undefined;
+    turnState = undefined;
     restoreFastMode(ctx);
     syncTools(ctx.model);
     updateFastModeStatus(ctx);
