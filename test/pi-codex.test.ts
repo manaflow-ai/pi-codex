@@ -723,6 +723,19 @@ test("swaps write tools only while a Codex model is selected", async () => {
   assert.equal(multipartResult.content[2].type, "text");
   assert.match(multipartResult.content[2].text, /-TAIL/);
   assert.deepEqual(multipartResult.details, { raw: true });
+  const manyTextItems: any = handlers.get("tool_result")?.(
+    {
+      toolName: "bash",
+      content: Array.from({ length: 20_000 }, () => ({
+        type: "text",
+        text: "x",
+      })),
+      details: undefined,
+      isError: false,
+    },
+    { model: { provider: "openai-codex", id: "gpt-5.6-sol" } },
+  );
+  assert.ok(manyTextItems.content.length <= 10_000);
 
   await handlers.get("session_start")?.({}, {
     model: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272_000 },
@@ -1133,7 +1146,7 @@ test("compaction omits legacy function item ids when replaying custom tools", ()
   const body = buildCompactRequest({
     model: {
       id: "gpt-5.6-sol",
-      provider: "openai-codex",
+      provider: "subrouter",
       api: "openai-codex-responses",
       input: ["text"],
       reasoning: true,
@@ -1149,8 +1162,8 @@ test("compaction omits legacy function item ids when replaying custom tools", ()
           arguments: { patch: "*** Begin Patch\n*** End Patch" },
         }],
         api: "openai-codex-responses",
-        provider: "openai-codex",
-        model: "gpt-5.6-sol",
+        provider: "subrouter",
+        model: "gpt-5.5",
         usage,
         stopReason: "toolUse",
         timestamp: 1,
