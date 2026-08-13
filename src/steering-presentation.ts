@@ -4,14 +4,24 @@ import {
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 
-const STEERING_PREFIX = [
-  "<steering-message>",
+const STEERING_INSTRUCTION = [
   "Treat this as an update to the current task.",
   "Only abandon, stop, or replace the previous work if this message explicitly requests that.",
-].join("\n") + "\n\n";
+].join("\n");
+const STEERING_DIRECTIVE = [
+  "<steering-message>",
+  STEERING_INSTRUCTION,
+  "</steering-message>",
+].join("\n");
+const LEGACY_STEERING_PREFIX = [
+  "<steering-message>",
+  STEERING_INSTRUCTION,
+  "",
+].join("\n");
 const STEERING_SUFFIX = "\n</steering-message>";
-const STEERING_BLOCK =
-  /<steering-message>\nTreat this as an update to the current task\.\nOnly abandon, stop, or replace the previous work if this message explicitly requests that\.\n\n([\s\S]*?)\n<\/steering-message>/g;
+const MESSAGE_PREFIX = "<message>\n";
+const MESSAGE_SUFFIX = "\n</message>";
+const WRAPPER_BOUNDARY = "\u0000pi-codex-steering-boundary\u0000";
 const MAX_TRACKED_MESSAGES = 500;
 const PREVIEW_LENGTH = 100;
 
@@ -106,6 +116,69 @@ function normalizedPreview(text: string): string {
   return `${normalized.slice(0, PREVIEW_LENGTH - 1).trimEnd()}…`;
 }
 
+function countOccurrences(text: string, value: string): number {
+  return text.split(value).length - 1;
+}
+
+function steeringPayload(text: string): string | undefined {
+  const directiveCount = countOccurrences(text, STEERING_DIRECTIVE);
+  let remainder = text.replaceAll(STEERING_DIRECTIVE, "");
+  const legacyPrefixCount = countOccurrences(remainder, LEGACY_STEERING_PREFIX);
+  if (directiveCount === 0 && legacyPrefixCount === 0) return undefined;
+
+  const messagePrefixCount = countOccurrences(remainder, MESSAGE_PREFIX);
+  const messageSuffixCount = countOccurrences(remainder, MESSAGE_SUFFIX);
+  if (
+    messagePrefixCount !== directiveCount ||
+    messageSuffixCount !== directiveCount
+  ) {
+    return undefined;
+  }
+
+  remainder = remainder
+    .replaceAll(MESSAGE_PREFIX, "")
+    .replaceAll(MESSAGE_SUFFIX, WRAPPER_BOUNDARY);
+  const remainingLegacyPrefixCount = countOccurrences(
+    remainder,
+    LEGACY_STEERING_PREFIX,
+  );
+  const legacySuffixCount = countOccurrences(remainder, STEERING_SUFFIX);
+  if (
+    remainingLegacyPrefixCount !== legacyPrefixCount ||
+    legacySuffixCount !== legacyPrefixCount
+  ) {
+    return undefined;
+  }
+
+  remainder = remainder
+    .replaceAll(LEGACY_STEERING_PREFIX, "")
+    .replaceAll(STEERING_SUFFIX, WRAPPER_BOUNDARY);
+  if (
+    remainder.includes(STEERING_DIRECTIVE) ||
+    remainder.includes(LEGACY_STEERING_PREFIX) ||
+    remainder.includes(MESSAGE_PREFIX) ||
+    remainder.includes(MESSAGE_SUFFIX)
+  ) {
+    return undefined;
+  }
+
+  return remainder
+    .split(WRAPPER_BOUNDARY)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function formatSteeringMessage(text: string): string {
+  return [
+    STEERING_DIRECTIVE,
+    "",
+    "<message>",
+    text,
+    "</message>",
+  ].join("\n");
+}
+
 function steeringGroupMarkdown(messages: readonly string[], expanded: boolean): string {
   if (messages.length === 1) {
     return `**Steering update**\n\n${messages[0]}`;
@@ -191,28 +264,16 @@ function isKnownSteeringMessage(message: MessageLike): boolean {
 }
 
 export function continueAfterSteeringMessage(text: string): string {
-  return `${STEERING_PREFIX}${text}${STEERING_SUFFIX}`;
+  return formatSteeringMessage(steeringPayload(text) ?? text);
 }
 
 export function collapseSteeringMessages(text: string): string {
-  const blocks = [...text.matchAll(STEERING_BLOCK)];
-  if (blocks.length < 2) return text;
-
-  let remainder = text;
-  for (const block of blocks) remainder = remainder.replace(block[0], "");
-  if (remainder.trim()) return text;
-
-  return continueAfterSteeringMessage(
-    blocks.map((block) => block[1]).join("\n\n"),
-  );
+  const payload = steeringPayload(text);
+  return payload === undefined ? text : formatSteeringMessage(payload);
 }
 
 export function steeringDisplayText(text: string): string {
-  const collapsed = collapseSteeringMessages(text);
-  const blocks = [...collapsed.matchAll(STEERING_BLOCK)];
-  if (blocks.length !== 1) return text;
-  const remainder = collapsed.replace(blocks[0][0], "").trim();
-  return remainder ? text : blocks[0][1];
+  return steeringPayload(text) ?? text;
 }
 
 export function resetSteeringPresentation(): void {

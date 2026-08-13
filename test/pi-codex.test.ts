@@ -95,9 +95,11 @@ test("steering messages tell every model to continue prior work by default", () 
       "<steering-message>",
       "Treat this as an update to the current task.",
       "Only abandon, stop, or replace the previous work if this message explicitly requests that.",
-      "",
-      "Also cover the error case.",
       "</steering-message>",
+      "",
+      "<message>",
+      "Also cover the error case.",
+      "</message>",
     ].join("\n"),
   );
 });
@@ -111,6 +113,38 @@ test("combined steering inputs collapse into one instruction block", () => {
       "Keep the answer to two lines.\n\nUse the existing terminology.",
     ),
   );
+});
+
+test("nested legacy steering inputs flatten into one directive and one message", () => {
+  const legacyWrap = (text: string) => [
+    "<steering-message>",
+    "Treat this as an update to the current task.",
+    "Only abandon, stop, or replace the previous work if this message explicitly requests that.",
+    "",
+    text,
+    "</steering-message>",
+  ].join("\n");
+  const nested = legacyWrap(legacyWrap(legacyWrap(
+    "Host the agent server remotely and keep the CLI thin.",
+  )));
+
+  const flattened = collapseSteeringMessages(nested);
+  assert.equal(
+    flattened,
+    continueAfterSteeringMessage(
+      "Host the agent server remotely and keep the CLI thin.",
+    ),
+  );
+  assert.equal(
+    flattened.match(/<steering-message>/g)?.length,
+    1,
+  );
+  assert.equal(flattened.match(/<message>/g)?.length, 1);
+});
+
+test("wrapping an already formatted steering input never nests XML", () => {
+  const formatted = continueAfterSteeringMessage("Preserve this update.");
+  assert.equal(continueAfterSteeringMessage(formatted), formatted);
 });
 
 test("steering instructions stay out of stored user text and merge only in model context", () => {
