@@ -62,6 +62,7 @@ import {
 import {
   CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
   formatCodexTruncatedOutput,
+  resolveCodexTruncationPolicy,
   truncateCodexText,
   truncateCodexOutput,
 } from "../src/output-truncation.ts";
@@ -1097,6 +1098,13 @@ test("Codex output truncation is model-facing only and preserves both ends", () 
   const unicode = truncateCodexOutput("🙂".repeat(20), 10);
   assert.equal(unicode.truncated, true);
   assert.doesNotThrow(() => JSON.stringify(unicode.content));
+  assert.deepEqual(
+    resolveCodexTruncationPolicy({
+      compat: { truncationPolicy: { type: "tokens", limit: 1_000_000 } },
+    }),
+    { type: "bytes", limit: CODEX_DEFAULT_OUTPUT_BUDGET_BYTES },
+    "token policies require a provider tokenizer and must not use byte estimates",
+  );
 });
 
 test("compaction preserves Codex tool wire modalities and deferred exposure", () => {
