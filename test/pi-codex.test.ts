@@ -78,7 +78,7 @@ import {
   summarizeWebSearchCommands,
 } from "../src/web-search.ts";
 
-function run(executable: string, args: string[], cwd: string) {
+function run(executable: string, args: string[], cwd: string, input?: string) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(executable, args, { cwd });
     let stdout = "";
@@ -87,6 +87,7 @@ function run(executable: string, args: string[], cwd: string) {
     child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stdout, stderr }));
+    if (input !== undefined) child.stdin.end(input);
   });
 }
 
@@ -410,6 +411,32 @@ test("uses the upstream freeform apply_patch grammar", () => {
   assert.match(applyPatchGrammar, /^start: begin_patch hunk\+ end_patch/m);
   assert.match(applyPatchGrammar, /update_hunk:.*change_move\? change\?/);
   assert.match(applyPatchGrammar, /eof_line: "\*\*\* End of File" LF/);
+});
+
+test("pi-codex loads when Pi starts outside the package directory", async () => {
+  const projectRoot = join(import.meta.dirname, "..");
+  const result = await run(
+    process.execPath,
+    [
+      join(
+        projectRoot,
+        "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+      ),
+      "--mode",
+      "rpc",
+      "--no-session",
+      "--no-extensions",
+      "--no-skills",
+      "--no-context-files",
+      "--extension",
+      join(projectRoot, "extensions/pi-codex.ts"),
+      "--offline",
+    ],
+    tmpdir(),
+    `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /"command":"get_state","success":true/);
 });
 
 test("recognizes Codex models", () => {
