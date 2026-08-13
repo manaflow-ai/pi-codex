@@ -86,6 +86,11 @@ The native Codex package is large because it includes the platform binary.
   patch details for rendering and inspection. Structured non-text result
   content remains attached to the truncated model-facing result.
 - Requests Codex Fast mode (`service_tier: "priority"`) for models that advertise the Fast tier, including normal turns and remote-compaction turns.
+- Marks spawned Codex processes with `PI_CODEX_SUBAGENT=pi-codex-subagent-v1`.
+  The cmux Pi session hook uses this origin marker, and the equivalent
+  `cmux_activity_origin: "subagent"` custom-message metadata, to retain child
+  feed/stop telemetry while skipping desktop completion notifications. This
+  is independent of Pi custom-message `display` state.
 - Renders successful `apply_patch` results as pi-native colored diffs generated from the actual before/after files.
 - Collapses the normal compaction notice to one line; `Ctrl+O` still expands its summary.
 - Uses a static working indicator with a once-per-second elapsed-time label

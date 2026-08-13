@@ -78,6 +78,14 @@ import {
   resolveWebSearchUrl,
   summarizeWebSearchCommands,
 } from "../src/web-search.ts";
+import {
+  classifyActivityOrigin,
+  PI_CODEX_SUBAGENT_ENV,
+  PI_CODEX_SUBAGENT_MARKER,
+  shouldRouteCompletionNotification,
+  subagentActivityDetails,
+  subagentEnvironment,
+} from "../src/subagent-origin.ts";
 
 function run(executable: string, args: string[], cwd: string, input?: string) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
@@ -142,6 +150,39 @@ test("cmux title subagent parses the final assistant event", () => {
     JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Contextual tab titles" }] } }),
   ].join("\n");
   assert.equal(titleFromJsonEvents(output), "Contextual tab titles");
+});
+
+test("subagent origin is machine-readable across process and custom-message paths", () => {
+  assert.equal(
+    subagentEnvironment({})[PI_CODEX_SUBAGENT_ENV],
+    PI_CODEX_SUBAGENT_MARKER,
+  );
+  assert.equal(
+    classifyActivityOrigin({}, subagentEnvironment({})),
+    "subagent",
+  );
+  assert.equal(
+    classifyActivityOrigin({
+      messages: [{
+        role: "custom",
+        details: subagentActivityDetails(),
+      }],
+    }, {}),
+    "subagent",
+  );
+  assert.equal(
+    classifyActivityOrigin({
+      role: "custom",
+      details: subagentActivityDetails(),
+    }, {}),
+    "subagent",
+  );
+  assert.equal(classifyActivityOrigin({}, {}), "parent");
+});
+
+test("cmux completion routing notifies parent turns and skips subagent turns", () => {
+  assert.equal(shouldRouteCompletionNotification("parent"), true);
+  assert.equal(shouldRouteCompletionNotification("subagent"), false);
 });
 
 test("cmux workspace inventory includes every surface in the scoped workspace", () => {
@@ -815,6 +856,18 @@ test("swaps write tools only while a Codex model is selected", async () => {
   const defaultFastPayload: any = {};
   handlers.get("before_provider_request")?.({ payload: defaultFastPayload }, fastCtx);
   assert.equal(defaultFastPayload.service_tier, "priority");
+  const spawnedAgentPayload: any = {};
+  handlers.get("before_provider_request")?.({
+    payload: spawnedAgentPayload,
+  }, {
+    ...fastCtx,
+    model: { provider: "openai-codex", id: "gpt-5.6-luna", contextWindow: 272_000 },
+  });
+  assert.equal(
+    spawnedAgentPayload.service_tier,
+    CODEX_FAST_SERVICE_TIER,
+    "spawned Codex agents use the shared provider Fast-mode hook",
+  );
   assert.doesNotThrow(() => {
     handlers.get("after_provider_response")?.({ status: 200 }, fastCtx);
   });

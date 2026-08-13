@@ -10,6 +10,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { subagentEnvironment } from "../src/subagent-origin.ts";
 
 const MAX_TITLE_CHARACTERS = 40;
 const MAX_REQUEST_TIMELINE_ITEMS = 3;
@@ -666,10 +667,8 @@ async function generateTitle(
     if (run.cancelled) throw new Error("tab-title subagent superseded");
     const invocation = getPiInvocation(args);
     const env = {
-      ...process.env,
+      ...subagentEnvironment(),
       [TITLE_SUBAGENT_ENV]: "1",
-      CMUX_PI_HOOKS_DISABLED: "1",
-      CMUX_SUPPRESS_SUBAGENT_NOTIFICATIONS: "1",
     };
     const result = await spawnCaptured(
       invocation.command,
