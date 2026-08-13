@@ -1043,6 +1043,75 @@ test("compaction preserves Codex tool wire modalities and deferred exposure", ()
   assert.equal((body.tools as any[])[0].strict, null);
 });
 
+test("compaction omits legacy function item ids when replaying custom tools", () => {
+  const callId = "call_NN4c5V7Onkj6YcXCXgijxyEs";
+  const legacyItemId =
+    "fc_01656a69efc78cad016a7d50b9d1f4819ba33c01fdfcd6bf52";
+  const toolCallId = `${callId}|${legacyItemId}`;
+  const usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    },
+  };
+  const body = buildCompactRequest({
+    model: {
+      id: "gpt-5.6-sol",
+      provider: "openai-codex",
+      api: "openai-codex-responses",
+      input: ["text"],
+      reasoning: true,
+      compat: { supportsOpenAIGrammarTools: true },
+    } as never,
+    messages: [
+      {
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: toolCallId,
+          name: "apply_patch",
+          arguments: { patch: "*** Begin Patch\n*** End Patch" },
+        }],
+        api: "openai-codex-responses",
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        usage,
+        stopReason: "toolUse",
+        timestamp: 1,
+      },
+      {
+        role: "toolResult",
+        toolCallId,
+        toolName: "apply_patch",
+        content: [{ type: "text", text: "Done" }],
+        isError: false,
+        timestamp: 2,
+      },
+    ] as never,
+    instructions: "system",
+  });
+
+  const customCall = body.input.find(
+    (item) => item.type === "custom_tool_call",
+  );
+  assert.ok(customCall);
+  assert.equal("id" in customCall, false);
+  assert.equal(customCall.call_id, callId);
+  assert.ok(body.input.some(
+    (item) =>
+      item.type === "custom_tool_call_output" &&
+      item.call_id === callId,
+  ));
+});
+
 test("remote compaction checkpoints parse, replay, and safely ignore stale input", () => {
   const compacted = { type: "compaction", encrypted_content: "opaque" };
   const parsed = parseRemoteCompactionSse([
