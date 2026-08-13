@@ -900,7 +900,6 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
       customInstructions: undefined,
       willRetry: true,
       signal: new AbortController().signal,
-      branchEntries: branch,
     }, ctx);
 
     assert.equal(requestedUrl, "http://subrouter.test/backend-api/codex/responses");
@@ -1110,6 +1109,63 @@ test("compaction omits legacy function item ids when replaying custom tools", ()
       item.type === "custom_tool_call_output" &&
       item.call_id === callId,
   ));
+});
+
+test("replacement history retains bounded assistant and oversized text messages", () => {
+  const compacted = { type: "compaction", encrypted_content: "opaque" };
+  const assistant = {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "intermediate answer" }],
+  };
+  assert.deepEqual(
+    buildReplacementHistory(
+      [assistant, { type: "compaction_trigger" }],
+      compacted,
+    ),
+    [assistant, compacted],
+  );
+
+  const oversized = {
+    type: "message",
+    role: "user",
+    content: "x".repeat(300_000),
+  };
+  const retained = buildReplacementHistory(
+    [oversized, { type: "compaction_trigger" }],
+    compacted,
+  );
+  assert.equal(retained.length, 2);
+  assert.equal(retained[0].role, "user");
+  assert.equal(typeof retained[0].content, "string");
+  assert.match(retained[0].content as string, /truncated/);
+  assert.ok(
+    Math.ceil(Buffer.byteLength(JSON.stringify(retained[0]), "utf8") / 4) <=
+      64_000,
+  );
+});
+
+test("replacement history does not let non-text content bypass its budget", () => {
+  const compacted = { type: "compaction", encrypted_content: "opaque" };
+  const oversizedImage = {
+    type: "message",
+    role: "user",
+    content: [{
+      type: "input_image",
+      image_url: `data:image/png;base64,${"a".repeat(300_000)}`,
+    }, {
+      type: "input_text",
+      text: "caption",
+    }],
+  };
+
+  assert.deepEqual(
+    buildReplacementHistory(
+      [oversizedImage, { type: "compaction_trigger" }],
+      compacted,
+    ),
+    [compacted],
+  );
 });
 
 test("remote compaction checkpoints parse, replay, and safely ignore stale input", () => {
