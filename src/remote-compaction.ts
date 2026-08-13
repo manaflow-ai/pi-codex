@@ -687,7 +687,15 @@ function truncateRetainedMessage(
     if (!value || typeof value !== "object") return value;
     const next: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      const visited = visit(entry, isTextContentKey(key));
+      const textContent = isTextContentKey(key);
+      const visited = visit(entry, textContent);
+      if (
+        visited === undefined &&
+        textContent &&
+        typeof entry === "string"
+      ) {
+        return undefined;
+      }
       if (visited !== undefined) next[key] = visited;
     }
     return next;

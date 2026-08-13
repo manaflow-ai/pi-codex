@@ -50,6 +50,7 @@ import {
   CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
   resolveCodexTruncationPolicy,
   truncateCodexOutput,
+  type CodexTruncationPolicy,
 } from "../src/output-truncation.ts";
 
 const grammarPath = fileURLToPath(new URL("../src/apply-patch.lark", import.meta.url));
@@ -120,9 +121,20 @@ function installCompactCompactionRenderer() {
 
 function isOpenAICodexModel(model: Model<any> | undefined): model is Model<any> {
   // Codex-compatible providers can be local/subrouter aliases while still
-  // speaking the OpenAI Responses protocol. Keep the remote compaction and
-  // checkpoint lifecycle attached to the protocol, not only the provider name.
+  // speaking the OpenAI Responses protocol. This controls Codex tool behavior;
+  // remote compaction has a narrower capability check below.
   return model?.provider === "openai-codex" || model?.api === "openai-codex-responses";
+}
+
+function supportsCodexRemoteCompaction(
+  model: Model<any> | undefined,
+): model is Model<any> {
+  if (!isOpenAICodexModel(model)) return false;
+  const declared =
+    (model as any).supportsRemoteCompaction ??
+    (model.compat as any)?.supportsRemoteCompaction;
+  if (typeof declared === "boolean") return declared;
+  return model.provider === "openai-codex" || model.provider === "subrouter";
 }
 
 function isCodexSolModel(model: Model<any> | undefined): boolean {
@@ -388,6 +400,14 @@ export default function piCodex(pi: ExtensionAPI) {
     return budget === CODEX_DEFAULT_OUTPUT_BUDGET_BYTES
       ? resolveCodexTruncationPolicy(model)
       : { type: "bytes" as const, limit: budget };
+  }
+
+  function truncationUnits(
+    text: string,
+    policy: CodexTruncationPolicy,
+  ): number {
+    const bytes = Buffer.byteLength(text, "utf8");
+    return policy.type === "bytes" ? bytes : Math.ceil(bytes / 4);
   }
 
   function latestRemoteCompaction(ctx: { sessionManager: { getBranch(): readonly any[] } }) {
@@ -701,26 +721,49 @@ export default function piCodex(pi: ExtensionAPI) {
   pi.on("tool_result", (event, ctx) => {
     if (!isOpenAICodexModel(ctx.model)) return;
     if (toolContracts.get(event.toolName)) return;
+    const policy = resolveCodexTruncationPolicy(ctx.model);
     const textIndexes = event.content.flatMap((item: any, index: number) =>
-      item.type === "text" ? [index] : [],
+      item.type === "text" && typeof item.text === "string" ? [index] : [],
     );
-    const text = textIndexes
-      .map((index) => (event.content[index] as any).text)
-      .join("\n");
-    if (!text) return;
-    const truncated = truncateCodexOutput(text, resolveCodexTruncationPolicy(ctx.model));
-    if (!truncated.truncated) return;
-    const firstTextIndex = textIndexes[0];
-    let inserted = false;
-    const content = event.content.flatMap((item: any, index: number) => {
-      if (item.type !== "text") return [item];
-      if (index !== firstTextIndex || inserted) return [];
-      inserted = true;
-      return [{ type: "text", text: truncated.content }];
+    const units = textIndexes.map((index) =>
+      truncationUnits((event.content[index] as any).text, policy),
+    );
+    const totalUnits = units.reduce((total, value) => total + value, 0);
+    if (totalUnits <= policy.limit) return;
+
+    // Retain the leading and trailing halves across all text slots. Each slot
+    // stays on its original side of images or audio, so truncation cannot move
+    // a later caption or question ahead of its associated attachment.
+    const front = Array(units.length).fill(0) as number[];
+    const back = Array(units.length).fill(0) as number[];
+    let frontRemaining = Math.floor(policy.limit / 2);
+    for (let index = 0; index < units.length && frontRemaining > 0; index++) {
+      front[index] = Math.min(units[index], frontRemaining);
+      frontRemaining -= front[index];
+    }
+    let backRemaining = policy.limit - Math.floor(policy.limit / 2);
+    for (let index = units.length - 1; index >= 0 && backRemaining > 0; index--) {
+      const available = units[index] - front[index];
+      back[index] = Math.min(available, backRemaining);
+      backRemaining -= back[index];
+    }
+    const allocations = new Map(
+      textIndexes.map((contentIndex, textIndex) => [
+        contentIndex,
+        front[textIndex] + back[textIndex],
+      ]),
+    );
+    const content = event.content.map((item: any, index: number) => {
+      const limit = allocations.get(index);
+      if (limit === undefined) return item;
+      return {
+        ...item,
+        text: truncateCodexOutput(item.text, {
+          type: policy.type,
+          limit,
+        }).content,
+      };
     });
-    // Codex's structured truncation coalesces text segments and keeps
-    // non-text payloads. Keep image/audio positions where possible instead of
-    // silently discarding them with the model-facing text.
     return {
       content,
       details: event.details,
@@ -767,7 +810,7 @@ export default function piCodex(pi: ExtensionAPI) {
 
   pi.on("session_before_compact", async (event, ctx) => {
     const model = ctx.model;
-    if (!isOpenAICodexModel(model)) return;
+    if (!supportsCodexRemoteCompaction(model)) return;
 
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok || !auth.apiKey) {
