@@ -958,13 +958,9 @@ export default function piCodex(pi: ExtensionAPI) {
 
   pi.on("agent_end", (event) => {
     if (classifyActivityOrigin(event) === "subagent") {
-      const typed = event as unknown as Record<string, unknown>;
-      Object.assign(typed, subagentActivityDetails());
-      if (Array.isArray(typed.messages)) {
-        for (const message of typed.messages) {
-          if (!message || typeof message !== "object") continue;
-          Object.assign(message, subagentActivityDetails());
-        }
+      Object.assign(event, subagentActivityDetails());
+      for (const message of event.messages) {
+        Object.assign(message, subagentActivityDetails());
       }
     }
     retryTurnState = undefined;
