@@ -48,6 +48,8 @@ export type WebSearchDetails = {
   results?: unknown[];
 };
 
+export const WEB_SEARCH_DETAILS_LIMIT_BYTES = 50_000;
+
 export function resolveWebSearchUrl(baseUrl?: string): string {
   const raw = baseUrl?.trim() || "https://chatgpt.com/backend-api";
   const normalized = raw.replace(/\/+$/, "");
@@ -201,4 +203,16 @@ export function summarizeWebSearchCommands(commands: WebSearchCommands): string 
   if (commands.sports?.length) return `${commands.sports[0].league} ${commands.sports[0].fn}`;
   if (commands.time?.length) return `time ${commands.time[0].utc_offset}`;
   return "web";
+}
+
+export function boundedWebSearchDetails(text: string): string {
+  if (Buffer.byteLength(text, "utf8") <= WEB_SEARCH_DETAILS_LIMIT_BYTES) {
+    return text;
+  }
+  const suffix = "\n… raw output truncated …";
+  const budget = WEB_SEARCH_DETAILS_LIMIT_BYTES - Buffer.byteLength(suffix, "utf8");
+  const source = Buffer.from(text, "utf8");
+  let end = budget;
+  while (end > 0 && (source[end] & 0xc0) === 0x80) end--;
+  return `${source.subarray(0, end).toString("utf8")}${suffix}`;
 }

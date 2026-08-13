@@ -36,6 +36,7 @@ import {
 } from "../src/remote-compaction.ts";
 import {
   buildWebSearchInput,
+  boundedWebSearchDetails,
   fetchCodexWebSearch,
   resolveWebSearchUrl,
   summarizeWebSearchCommands,
@@ -565,7 +566,7 @@ export default function piCodex(pi: ExtensionAPI) {
         details: {
           commands,
           endpoint,
-          rawOutput: result.text,
+          rawOutput: boundedWebSearchDetails(result.text),
           results: result.response.results,
         } satisfies WebSearchDetails,
       };
