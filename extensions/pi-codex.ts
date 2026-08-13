@@ -952,7 +952,7 @@ export default function piCodex(pi: ExtensionAPI) {
     if (state) turnState ??= state;
   });
 
-  pi.on("agent_end", () => {
+  pi.on("agent_end", (event) => {
     retryTurnState = undefined;
   });
   pi.on("turn_start", () => {
