@@ -22,11 +22,13 @@ import {
   buildReplacementHistory,
   checkpointMarker,
   convertCodexTools,
+  fingerprintContext,
   fetchRemoteCompaction,
-  fingerprintCheckpointInput,
+  fingerprintCheckpointSuffix,
   installRemoteCheckpoint,
   isRemoteCompactionDetails,
   parseRemoteCompactionSse,
+  retainedContextItems,
   REMOTE_COMPACTION_VERSION,
   toPiUsage,
   type RemoteCompactionDetails,
@@ -328,13 +330,14 @@ export default function piCodex(pi: ExtensionAPI) {
   const toolContracts = new ToolContractRegistry();
   let activeToolCatalogFingerprint = "";
 
-  function activeCodexToolSpecs() {
+  function activeCodexToolSpecs(includeDeferred = false) {
     return pi
       .getAllTools()
       .filter((tool) => pi.getActiveTools().includes(tool.name))
       .flatMap((tool) => {
         const contract = toolContracts.get(tool.name);
-        if (contract && !contract.isDirect()) return [];
+        if (contract?.exposure === "hidden") return [];
+        if (contract && !contract.isDirect() && !includeDeferred) return [];
         const contractTool = contract?.toCodexTool();
         return [contractTool ?? {
           name: tool.name,
@@ -349,11 +352,27 @@ export default function piCodex(pi: ExtensionAPI) {
 
   function activeCodexToolFingerprint(model: Model<any> | undefined): string {
     const tools = activeCodexToolSpecs();
+    const deferredTools = activeCodexToolSpecs(true).filter(
+      (tool) => !tools.some((direct) => direct.name === tool.name),
+    );
+    const directWireTools = model
+      ? convertCodexTools(model, tools) ?? tools
+      : tools;
+    const deferredWireTools = model
+      ? convertCodexTools(model, deferredTools) ?? deferredTools
+      : deferredTools;
     return fingerprintToolSpecs([
-      ...(model ? convertCodexTools(model, tools) ?? tools : tools),
+      ...directWireTools,
+      {
+        name: "__pi_codex_deferred_tools__",
+        tools: deferredWireTools,
+      },
       {
         name: "__pi_codex_model_compat__",
+        provider: model?.provider,
+        model: model?.id,
         api: model?.api,
+        contextWindow: model?.contextWindow,
         supportsStrictMode: (model?.compat as any)?.supportsStrictMode,
         supportsOpenAIGrammarTools: (model?.compat as any)?.supportsOpenAIGrammarTools,
         supportsToolSearch: (model?.compat as any)?.supportsToolSearch,
@@ -678,16 +697,28 @@ export default function piCodex(pi: ExtensionAPI) {
   pi.on("tool_result", (event, ctx) => {
     if (!isOpenAICodexModel(ctx.model)) return;
     if (toolContracts.get(event.toolName)) return;
-    const text = event.content
-      .filter((item: any) => item.type === "text")
-      .map((item: any) => item.text)
+    const textIndexes = event.content.flatMap((item: any, index: number) =>
+      item.type === "text" ? [index] : [],
+    );
+    const text = textIndexes
+      .map((index) => (event.content[index] as any).text)
       .join("\n");
     if (!text) return;
     const truncated = truncateCodexOutput(text, resolveCodexTruncationPolicy(ctx.model));
     if (!truncated.truncated) return;
-    const nonText = event.content.filter((item: any) => item.type !== "text");
+    const firstTextIndex = textIndexes[0];
+    let inserted = false;
+    const content = event.content.flatMap((item: any, index: number) => {
+      if (item.type !== "text") return [item];
+      if (index !== firstTextIndex || inserted) return [];
+      inserted = true;
+      return [{ type: "text", text: truncated.content }];
+    });
+    // Codex's structured truncation coalesces text segments and keeps
+    // non-text payloads. Keep image/audio positions where possible instead of
+    // silently discarding them with the model-facing text.
     return {
-      content: [{ type: "text", text: truncated.content }, ...nonText],
+      content,
       details: event.details,
       isError: event.isError,
       usage: event.usage,
@@ -781,6 +812,11 @@ export default function piCodex(pi: ExtensionAPI) {
     const parsedCompaction = parseRemoteCompactionSse(responseText);
     const { compaction } = parsedCompaction;
     const output = buildReplacementHistory(body.input, compaction);
+    const retainedContext = retainedContextItems(
+      model,
+      (event as any).branchEntries ?? [],
+      event.preparation.firstKeptEntryId,
+    );
 
     const modifiedFiles = new Set([
       ...event.preparation.fileOps.written,
@@ -802,7 +838,12 @@ export default function piCodex(pi: ExtensionAPI) {
         response.headers.get("x-codex-turn-state") ??
         parsedCompaction.turnState,
       toolCatalogFingerprint: activeToolCatalogFingerprint,
-      contextFingerprint: fingerprintCheckpointInput(body.input),
+      ...(retainedContext.length
+        ? {
+            contextFingerprint: fingerprintContext(retainedContext),
+            retainedContextItemCount: retainedContext.length,
+          }
+        : {}),
       retainedHistoryVersion: "codex-responses-v2",
       tokenUsage: parsedCompaction.tokenUsage,
     };
@@ -833,8 +874,20 @@ export default function piCodex(pi: ExtensionAPI) {
     const details = latestRemoteCompaction(ctx);
     if (details) {
       const currentToolCatalogFingerprint = activeCodexToolFingerprint(ctx.model);
+      const input = ((event.payload as any)?.input ?? []) as readonly unknown[];
+      const expectedContextFingerprint =
+        details.contextFingerprint && details.retainedContextItemCount !== undefined
+          ? fingerprintCheckpointSuffix(
+              input,
+              checkpointMarker(details.checkpointId),
+              details.retainedContextItemCount,
+            )
+          : undefined;
       return installRemoteCheckpoint(event.payload, details, {
         toolCatalogFingerprint: currentToolCatalogFingerprint,
+        ...(expectedContextFingerprint
+          ? { contextFingerprint: expectedContextFingerprint }
+          : {}),
       });
     }
   });

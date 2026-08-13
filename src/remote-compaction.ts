@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import {
   convertToLlm,
+  sessionEntryToContextMessages,
   type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -39,6 +40,7 @@ export interface RemoteCompactionDetails {
   turnState?: string;
   toolCatalogFingerprint?: string;
   contextFingerprint?: string;
+  retainedContextItemCount?: number;
   retainedHistoryVersion?: string;
   tokenUsage?: Record<string, unknown>;
 }
@@ -76,6 +78,9 @@ export function isRemoteCompactionDetails(value: unknown): value is RemoteCompac
       typeof details.toolCatalogFingerprint === "string") &&
     (details.contextFingerprint === undefined ||
       typeof details.contextFingerprint === "string") &&
+    (details.retainedContextItemCount === undefined ||
+      (Number.isSafeInteger(details.retainedContextItemCount) &&
+        details.retainedContextItemCount >= 0)) &&
     (details.tokenUsage === undefined ||
       (typeof details.tokenUsage === "object" && details.tokenUsage !== null))
   );
@@ -104,6 +109,33 @@ export function fingerprintCheckpointInput(
     return item;
   }) as ResponseItem[];
   return fingerprintContext(normalized);
+}
+
+export function fingerprintCheckpointSuffix(
+  input: readonly unknown[],
+  marker: string,
+  itemCount: number,
+): string | undefined {
+  const markerIndex = input.findIndex((item) => itemContainsMarker(item, marker));
+  if (markerIndex < 0) return undefined;
+  const suffix = input.slice(markerIndex + 1, markerIndex + 1 + itemCount);
+  if (suffix.length !== itemCount) return undefined;
+  return fingerprintContext(suffix as ResponseItem[]);
+}
+
+export function retainedContextItems(
+  model: Model<any>,
+  branchEntries: readonly any[],
+  firstKeptEntryId: string,
+): ResponseItem[] {
+  const firstKeptIndex = branchEntries.findIndex(
+    (entry) => entry?.id === firstKeptEntryId,
+  );
+  if (firstKeptIndex < 0) return [];
+  const messages = branchEntries
+    .slice(firstKeptIndex)
+    .flatMap((entry) => sessionEntryToContextMessages(entry));
+  return convertCompactionMessages(model, messages as CompactionMessages);
 }
 
 function numeric(value: unknown): number {
@@ -620,6 +652,11 @@ export function installRemoteCheckpoint(
     details.version === REMOTE_COMPACTION_VERSION &&
     (!details.toolCatalogFingerprint ||
       !expected?.toolCatalogFingerprint)
+  ) return payload;
+  if (
+    details.version === REMOTE_COMPACTION_VERSION &&
+    details.contextFingerprint &&
+    !expected?.contextFingerprint
   ) return payload;
   if (
     expected?.toolCatalogFingerprint &&

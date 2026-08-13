@@ -83,7 +83,8 @@ The native Codex package is large because it includes the platform binary.
 - Uses current Codex remote compaction V2 for the `openai-codex` provider.
 - Applies Codex's model-facing middle-output truncation policy to package
   tools and the `tool_result` boundary, while retaining raw search output and
-  patch details for rendering and inspection.
+  patch details for rendering and inspection. Structured non-text result
+  content remains attached to the truncated model-facing result.
 - Requests Codex Fast mode (`service_tier: "priority"`) for models that advertise the Fast tier, including normal turns and remote-compaction turns.
 - Renders successful `apply_patch` results as pi-native colored diffs generated from the actual before/after files.
 - Collapses the normal compaction notice to one line; `Ctrl+O` still expands its summary.
@@ -117,10 +118,10 @@ Current OpenAI Codex enables `RemoteCompactionV2` by default. `pi-codex` mirrors
 2. Appends `{ "type": "compaction_trigger" }` to the Responses input.
 3. Requires exactly one `{ "type": "compaction" }` output item.
 4. Persists the opaque replacement history in pi's compaction entry and reinstalls it verbatim in later Codex requests, including after resume.
-5. Stores the response ID, token usage, tool-catalog fingerprint, and checkpoint
-   version with the replacement history. A v2 checkpoint is replayed only when
-   its marker and active tool catalog still match; legacy v1 entries remain
-   readable.
+5. Stores the response ID, token usage, tool-catalog fingerprint, retained
+   suffix fingerprint, and checkpoint version with the replacement history. A
+   v2 checkpoint is replayed only when its marker, active tool catalog, and
+   retained suffix still match; legacy v1 entries remain readable.
 6. Replays `x-codex-turn-state` only within the active Pi turn, including an
    immediate overflow retry.
 

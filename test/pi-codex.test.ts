@@ -53,6 +53,7 @@ import {
   buildCompactRequest,
   checkpointMarker,
   fingerprintCheckpointInput,
+  fingerprintCheckpointSuffix,
   installRemoteCheckpoint,
   isRemoteCompactionDetails,
   parseRemoteCompactionSse,
@@ -675,6 +676,21 @@ test("swaps write tools only while a Codex model is selected", async () => {
   assert.equal(toolDefinition.constrainedSampling.type, "grammar");
   assert.deepEqual(toolDefinition.parameters.required, ["patch"]);
   assert.match(toolDefinition.promptGuidelines.join("\n"), /re-read the affected region/);
+  const multipartResult: any = handlers.get("tool_result")?.(
+    {
+      toolName: "bash",
+      content: [
+        { type: "text", text: "HEAD-" + "x".repeat(20_000) },
+        { type: "image", data: "image", mimeType: "image/png" },
+        { type: "text", text: "-TAIL" },
+      ],
+      details: { raw: true },
+      isError: false,
+    },
+    { model: { provider: "openai-codex", id: "gpt-5.6-sol" } },
+  );
+  assert.equal(multipartResult.content[1].type, "image");
+  assert.deepEqual(multipartResult.details, { raw: true });
 
   await handlers.get("session_start")?.({}, {
     model: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272_000 },
@@ -846,6 +862,17 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
 
   try {
     const branch: any[] = [];
+    branch.push({
+      type: "message",
+      id: "kept-entry",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "retained tail" }],
+        timestamp: 1,
+      },
+    });
     const ctx = {
       model,
       thinkingLevel: "medium",
@@ -873,6 +900,7 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
       customInstructions: undefined,
       willRetry: true,
       signal: new AbortController().signal,
+      branchEntries: branch,
     }, ctx);
 
     assert.equal(requestedUrl, "http://subrouter.test/backend-api/codex/responses");
@@ -894,6 +922,7 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
     assert.equal(compaction.usage.cacheRead, 20);
     assert.equal(compaction.usage.cacheWrite, 10);
     assert.equal(compaction.usage.reasoning, 12);
+    assert.equal(compaction.details.retainedContextItemCount, 1);
     assert.equal(compaction.details.output.at(-1).encrypted_content, "opaque-checkpoint");
     branch.push({ type: "compaction", details: compaction.details });
     const providerPayload: any = {
@@ -903,11 +932,17 @@ test("remote compaction persists and reinstalls Codex replacement history", asyn
           type: "input_text",
           text: checkpointMarker(compaction.details.checkpointId),
         }],
+      }, {
+        role: "user",
+        content: [{ type: "input_text", text: "retained tail" }],
       }],
     };
     handlers.get("before_provider_request")?.({ payload: providerPayload }, ctx);
     assert.equal(providerPayload.service_tier, "priority");
-    assert.deepEqual(providerPayload.input, compaction.details.output);
+    assert.deepEqual(
+      providerPayload.input,
+      [...compaction.details.output, providerPayload.input.at(-1)],
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1039,6 +1074,35 @@ test("remote compaction checkpoints parse, replay, and safely ignore stale input
     "legacy Subrouter checkpoints remain readable",
   );
   const payload: any = { input: checkpointInput };
+  const suffix = [{ type: "message", role: "user", content: [{ type: "input_text", text: "tail" }] }];
+  const suffixPayload: any = {
+    input: [...checkpointInput, ...suffix],
+  };
+  const suffixFingerprint = fingerprintCheckpointSuffix(
+    suffixPayload.input,
+    checkpointMarker("cp-1"),
+    1,
+  );
+  assert.ok(suffixFingerprint);
+  const mismatchedSuffix: any = {
+    input: [
+      ...checkpointInput,
+      { type: "message", role: "user", content: [{ type: "input_text", text: "changed" }] },
+    ],
+  };
+  installRemoteCheckpoint(mismatchedSuffix, {
+    ...details,
+    contextFingerprint: suffixFingerprint,
+    retainedContextItemCount: 1,
+  }, {
+    toolCatalogFingerprint: "catalog-1",
+    contextFingerprint: fingerprintCheckpointSuffix(
+      mismatchedSuffix.input,
+      checkpointMarker("cp-1"),
+      1,
+    ),
+  });
+  assert.match(JSON.stringify(mismatchedSuffix), /changed/);
   installRemoteCheckpoint(payload, details, {
     toolCatalogFingerprint: "catalog-1",
     contextFingerprint: fingerprintCheckpointInput(payload.input, checkpointMarker("cp-1")),
