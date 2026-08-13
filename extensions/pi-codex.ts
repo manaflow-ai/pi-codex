@@ -35,6 +35,18 @@ import {
   type WebSearchCommands,
   type WebSearchDetails,
 } from "../src/web-search.ts";
+import { installCompactionElapsedRenderer } from "../src/compaction-elapsed.ts";
+import {
+  clearPendingSteeringInputs,
+  collapseSteeringMessages,
+  continueAfterSteeringMessage,
+  installSteeringMessageRenderer,
+  markDeliveredSteeringMessage,
+  resetSteeringPresentation,
+  steeringDisplayText,
+  trackSteeringInput,
+  transformSteeringContext,
+} from "../src/steering-presentation.ts";
 
 const grammarPath = fileURLToPath(new URL("../src/apply-patch.lark", import.meta.url));
 const applyPatchGrammar = readFileSync(grammarPath, "utf8");
@@ -263,35 +275,6 @@ function pathsFromPatch(patch: string): string[] {
   return [...paths];
 }
 
-function continueAfterSteeringMessage(text: string): string {
-  return [
-    "<steering-message>",
-    "Treat this as an update to the current task.",
-    "Only abandon, stop, or replace the previous work if this message explicitly requests that.",
-    "",
-    text,
-    "</steering-message>",
-  ].join("\n");
-}
-
-function collapseSteeringMessages(text: string): string {
-  const blocks = [
-    ...text.matchAll(
-      /<steering-message>\nTreat this as an update to the current task\.\nOnly abandon, stop, or replace the previous work if this message explicitly requests that\.\n\n([\s\S]*?)\n<\/steering-message>/g,
-    ),
-  ];
-  if (blocks.length < 2) return text;
-
-  let remainder = text;
-  for (const block of blocks) remainder = remainder.replace(block[0], "");
-  remainder = remainder.trim();
-  if (remainder) return text;
-
-  return continueAfterSteeringMessage(
-    blocks.map((block) => block[1]).join("\n\n"),
-  );
-}
-
 async function readPatchFile(cwd: string, path: string): Promise<string> {
   try {
     return await readFile(resolve(cwd, path), "utf8");
@@ -303,6 +286,8 @@ async function readPatchFile(cwd: string, path: string): Promise<string> {
 export default function piCodex(pi: ExtensionAPI) {
   installCodexCompactionThreshold();
   installCompactCompactionRenderer();
+  installCompactionElapsedRenderer();
+  installSteeringMessageRenderer();
   let applyPatchSelected: boolean | undefined;
   let webSearchSelected: boolean | undefined;
   let retryTurnState: string | undefined;
@@ -580,41 +565,38 @@ export default function piCodex(pi: ExtensionAPI) {
     },
   });
 
-  // Steering is model-independent. Make an interruption additive by default
-  // while preserving the user's ability to explicitly stop or replace the task.
+  // Keep the user's text clean in the queue, transcript, and editor. The
+  // additive steering instruction is injected only into model context.
   pi.on("input", (event) => {
     if (event.streamingBehavior !== "steer") return;
-    return {
-      action: "transform",
-      text: continueAfterSteeringMessage(event.text),
-    };
+    trackSteeringInput(event.text);
+    return { action: "continue" };
   });
 
-  // In "all" delivery mode, pi may combine several queued steering inputs into
-  // one user message. Remove the repeated instructions before model requests.
-  pi.on("context", (event) => {
-    let changed = false;
-    const messages = event.messages.map((message) => {
-      if (message.role !== "user") return message;
-      if (typeof message.content === "string") {
-        const content = collapseSteeringMessages(message.content);
-        if (content === message.content) return message;
-        changed = true;
-        return { ...message, content };
-      }
-      let messageChanged = false;
-      const content = message.content.map((item) => {
-        if (item.type !== "text") return item;
-        const text = collapseSteeringMessages(item.text);
-        if (text === item.text) return item;
-        changed = true;
-        messageChanged = true;
-        return { ...item, text };
-      });
-      return messageChanged ? { ...message, content } : message;
-    });
-    if (changed) return { messages };
+  pi.on("message_start", (event) => {
+    if (event.message.role === "user") {
+      markDeliveredSteeringMessage(event.message);
+    }
   });
+
+  // In "all" delivery mode, adjacent steering inputs become one additive
+  // instruction block for the model while remaining separate raw inputs in the
+  // persisted transcript.
+  pi.on("context", (event) => {
+    return { messages: transformSteeringContext(event.messages) };
+  });
+
+  const markdownApi = pi as ExtensionAPI & {
+    registerMarkdownTransformer?: (
+      transformer: (
+        markdown: string,
+        context: { messageType: "user" | "assistant" | "assistant-thinking" },
+      ) => string,
+    ) => void;
+  };
+  markdownApi.registerMarkdownTransformer?.((markdown, context) =>
+    context.messageType === "user" ? steeringDisplayText(markdown) : markdown,
+  );
 
   pi.on("session_before_compact", async (event, ctx) => {
     const model = ctx.model;
@@ -733,9 +715,11 @@ export default function piCodex(pi: ExtensionAPI) {
     startWorkingTicker(ctx);
   });
   pi.on("agent_settled", (_event, ctx) => {
+    clearPendingSteeringInputs();
     stopWorkingTicker(ctx);
   });
   pi.on("session_start", (_event, ctx) => {
+    resetSteeringPresentation();
     restoreFastMode(ctx);
     syncTools(ctx.model);
     updateFastModeStatus(ctx);

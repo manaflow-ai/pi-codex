@@ -12,6 +12,7 @@ import {
   SettingsManager,
   shouldCompact,
   type ExtensionAPI,
+  UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import piCodex, {
   applyPatchGrammar,
@@ -57,6 +58,23 @@ import {
   resolveWebSearchUrl,
   summarizeWebSearchCommands,
 } from "../src/web-search.ts";
+import {
+  CompactionStatusIndicator,
+  formatElapsed,
+  installCompactionElapsedRenderer,
+  withElapsedTime,
+} from "../src/compaction-elapsed.ts";
+import {
+  clearPendingSteeringInputs,
+  collapsePendingSteeringRows,
+  collapseRenderedSteeringMessage,
+  markDeliveredSteeringMessage,
+  resetSteeringPresentation,
+  steeringDisplayText,
+  SteeringMessageGroupComponent,
+  trackSteeringInput,
+  transformSteeringContext,
+} from "../src/steering-presentation.ts";
 
 function run(executable: string, args: string[], cwd: string) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
@@ -77,9 +95,11 @@ test("steering messages tell every model to continue prior work by default", () 
       "<steering-message>",
       "Treat this as an update to the current task.",
       "Only abandon, stop, or replace the previous work if this message explicitly requests that.",
-      "",
-      "Also cover the error case.",
       "</steering-message>",
+      "",
+      "<message>",
+      "Also cover the error case.",
+      "</message>",
     ].join("\n"),
   );
 });
@@ -93,6 +113,186 @@ test("combined steering inputs collapse into one instruction block", () => {
       "Keep the answer to two lines.\n\nUse the existing terminology.",
     ),
   );
+});
+
+test("nested legacy steering inputs flatten into one directive and one message", () => {
+  const legacyWrap = (text: string) => [
+    "<steering-message>",
+    "Treat this as an update to the current task.",
+    "Only abandon, stop, or replace the previous work if this message explicitly requests that.",
+    "",
+    text,
+    "</steering-message>",
+  ].join("\n");
+  const nested = legacyWrap(legacyWrap(legacyWrap(
+    "Host the agent server remotely and keep the CLI thin.",
+  )));
+
+  const flattened = collapseSteeringMessages(nested);
+  assert.equal(
+    flattened,
+    continueAfterSteeringMessage(
+      "Host the agent server remotely and keep the CLI thin.",
+    ),
+  );
+  assert.equal(
+    flattened.match(/<steering-message>/g)?.length,
+    1,
+  );
+  assert.equal(flattened.match(/<message>/g)?.length, 1);
+});
+
+test("wrapping an already formatted steering input never nests XML", () => {
+  const formatted = continueAfterSteeringMessage("Preserve this update.");
+  assert.equal(continueAfterSteeringMessage(formatted), formatted);
+});
+
+test("steering instructions stay out of stored user text and merge only in model context", () => {
+  resetSteeringPresentation();
+  const first = {
+    role: "user",
+    content: [{ type: "text", text: "Keep the answer short." }],
+    timestamp: 100,
+  };
+  const second = {
+    role: "user",
+    content: [{ type: "text", text: "Use existing terminology." }],
+    timestamp: 101,
+  };
+
+  trackSteeringInput("Keep the answer short.");
+  trackSteeringInput("Use existing terminology.");
+  assert.equal(markDeliveredSteeringMessage(first), true);
+  assert.equal(markDeliveredSteeringMessage(second), true);
+
+  const transformed = transformSteeringContext([first, second]);
+  assert.equal(transformed.length, 1);
+  const modelText = (transformed[0].content as Array<{ text?: string }>)[0].text;
+  assert.equal(
+    modelText,
+    continueAfterSteeringMessage(
+      "Keep the answer short.\n\nUse existing terminology.",
+    ),
+  );
+  assert.equal(
+    (first.content as Array<{ text: string }>)[0].text,
+    "Keep the answer short.",
+  );
+  clearPendingSteeringInputs();
+});
+
+test("legacy steering wrappers render as clean user text", () => {
+  const wrapped = continueAfterSteeringMessage("Do not show the wrapper.");
+  assert.equal(steeringDisplayText(wrapped), "Do not show the wrapper.");
+  assert.equal(steeringDisplayText("ordinary user text"), "ordinary user text");
+});
+
+test("interactive steering keeps the raw text available for dequeue and undo", () => {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const pi = {
+    registerCommand() {},
+    registerTool() {},
+    registerMarkdownTransformer() {},
+    getActiveTools: () => [],
+    setActiveTools() {},
+    on(name: string, handler: (...args: any[]) => unknown) {
+      handlers.set(name, handler);
+    },
+  } as unknown as ExtensionAPI;
+  piCodex(pi);
+  resetSteeringPresentation();
+
+  const result = handlers.get("input")?.({
+    type: "input",
+    text: "Keep this exact text.",
+    source: "interactive",
+    streamingBehavior: "steer",
+  });
+
+  assert.deepEqual(result, { action: "continue" });
+  assert.equal(
+    (result as { text?: string }).text,
+    undefined,
+    "a transform would put the private wrapper into Pi's queue and editor",
+  );
+  clearPendingSteeringInputs();
+});
+
+test("steering groups collapse by default and expand to every message", () => {
+  initTheme(undefined, false);
+  const children: unknown[] = [
+    new UserMessageComponent("First update"),
+  ];
+  collapseRenderedSteeringMessage(children, "First update", false);
+  children.push(
+    { spacer: true },
+    new UserMessageComponent("Second update"),
+  );
+  collapseRenderedSteeringMessage(children, "Second update", false);
+  assert.equal(children.length, 1);
+  const component = children[0] as SteeringMessageGroupComponent;
+
+  const collapsed = stripVTControlCharacters(component.render(120).join("\n"));
+  assert.match(collapsed, /2 steering updates/);
+  assert.match(collapsed, /Second update/);
+  assert.doesNotMatch(collapsed, /First update/);
+
+  component.setExpanded(true);
+  const expanded = stripVTControlCharacters(component.render(120).join("\n"));
+  assert.match(expanded, /First update/);
+  assert.match(expanded, /Second update/);
+});
+
+test("pending steering rows collapse without changing queued text", () => {
+  const children: unknown[] = [
+    { spacer: true },
+    { text: "Steering: First update" },
+    { text: "Steering: Second update" },
+    { text: "↳ escape to edit all queued messages" },
+  ];
+  const queued = ["First update", "Second update"];
+
+  collapsePendingSteeringRows(children, queued);
+
+  assert.equal(children.length, 3);
+  assert.equal(
+    (children[1] as { text: string }).text,
+    "Steering (2): Second update",
+  );
+  assert.deepEqual(queued, ["First update", "Second update"]);
+});
+
+test("compaction status reports live elapsed time", () => {
+  initTheme(undefined, false);
+  installCompactionElapsedRenderer();
+  const originalNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  const indicator = new CompactionStatusIndicator(
+    { requestRender() {} },
+    "threshold",
+  );
+  indicator.stop();
+
+  try {
+    assert.match(
+      stripVTControlCharacters(indicator.render(120).join("\n")),
+      /Auto-compacting\.\.\. 0s elapsed/,
+    );
+    now += 65_000;
+    assert.match(
+      stripVTControlCharacters(indicator.render(120).join("\n")),
+      /Auto-compacting\.\.\. 1m 5s elapsed/,
+    );
+    assert.equal(formatElapsed(3_661_000), "1h 1m");
+    assert.equal(
+      withElapsedTime("Compacting... (esc to cancel)", 2_000),
+      "Compacting... 2s elapsed (esc to cancel)",
+    );
+  } finally {
+    indicator.dispose();
+    Date.now = originalNow;
+  }
 });
 
 test("cmux tab titles are short and omit session IDs", () => {
