@@ -127,11 +127,11 @@ export function retainedContextItems(
   model: Model<any>,
   branchEntries: readonly any[],
   firstKeptEntryId: string,
-): ResponseItem[] {
+): ResponseItem[] | undefined {
   const firstKeptIndex = branchEntries.findIndex(
     (entry) => entry?.id === firstKeptEntryId,
   );
-  if (firstKeptIndex < 0) return [];
+  if (firstKeptIndex < 0) return undefined;
   const messages = branchEntries
     .slice(firstKeptIndex)
     .flatMap((entry) => sessionEntryToContextMessages(entry));

@@ -817,6 +817,11 @@ export default function piCodex(pi: ExtensionAPI) {
       (event as any).branchEntries ?? [],
       event.preparation.firstKeptEntryId,
     );
+    if (!retainedContext) {
+      throw new Error(
+        "Codex remote compaction could not establish the retained session context",
+      );
+    }
 
     const modifiedFiles = new Set([
       ...event.preparation.fileOps.written,
@@ -838,12 +843,8 @@ export default function piCodex(pi: ExtensionAPI) {
         response.headers.get("x-codex-turn-state") ??
         parsedCompaction.turnState,
       toolCatalogFingerprint: activeToolCatalogFingerprint,
-      ...(retainedContext.length
-        ? {
-            contextFingerprint: fingerprintContext(retainedContext),
-            retainedContextItemCount: retainedContext.length,
-          }
-        : {}),
+      contextFingerprint: fingerprintContext(retainedContext),
+      retainedContextItemCount: retainedContext.length,
       retainedHistoryVersion: "codex-responses-v2",
       tokenUsage: parsedCompaction.tokenUsage,
     };
