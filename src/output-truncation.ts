@@ -5,14 +5,14 @@
 export const CODEX_DEFAULT_OUTPUT_BUDGET_BYTES = 10_000;
 const APPROX_BYTES_PER_TOKEN = 4;
 
-export type CodexTruncationPolicy =
-  | { type: "bytes"; limit: number }
-  | { type: "tokens"; limit: number };
+export type CodexTruncationPolicy = { type: "bytes"; limit: number };
 
 /**
  * Pi's public Model type does not yet carry Codex's server model metadata.
- * Accept the metadata when a provider supplies it, and retain Codex's
- * 10,000-byte default otherwise.
+ * Accept byte metadata when a provider supplies it. A token policy requires
+ * the provider's model tokenizer, which Pi does not expose, so fall back to
+ * Codex's conservative 10,000-byte default rather than misusing a byte
+ * estimate as a token limit.
  */
 export function resolveCodexTruncationPolicy(model: unknown): CodexTruncationPolicy {
   const candidate =
@@ -22,11 +22,11 @@ export function resolveCodexTruncationPolicy(model: unknown): CodexTruncationPol
       : undefined;
   if (
     candidate &&
-    (candidate.type === "bytes" || candidate.type === "tokens") &&
+    candidate.type === "bytes" &&
     Number.isSafeInteger(candidate.limit) &&
     candidate.limit >= 0
   ) {
-    return { type: candidate.type, limit: candidate.limit };
+    return { type: "bytes", limit: candidate.limit };
   }
   return { type: "bytes", limit: CODEX_DEFAULT_OUTPUT_BUDGET_BYTES };
 }
@@ -100,22 +100,13 @@ function middleTruncate(
   policy: CodexTruncationPolicy,
 ): { text: string; truncated: boolean } {
   const sourceBytes = Buffer.byteLength(content, "utf8");
-  const byteBudget =
-    policy.type === "bytes"
-      ? validateLimit(policy.limit)
-      : validateLimit(policy.limit) * APPROX_BYTES_PER_TOKEN;
+  const byteBudget = validateLimit(policy.limit);
 
   if (sourceBytes <= byteBudget) return { text: content, truncated: false };
 
-  const markerUnit =
-    policy.type === "bytes" ? "chars" : "tokens";
   if (byteBudget === 0) {
-    const removed =
-      policy.type === "bytes"
-        ? Array.from(content).length
-        : approxTokenCount(content);
     return {
-      text: `…${removed} ${markerUnit} truncated…`,
+      text: `…${Array.from(content).length} chars truncated…`,
       truncated: true,
     };
   }
@@ -123,14 +114,8 @@ function middleTruncate(
   const leftBudget = Math.floor(byteBudget / 2);
   const rightBudget = byteBudget - leftBudget;
   const { left, right, removedChars } = splitMiddle(content, leftBudget, rightBudget);
-  const removed =
-    policy.type === "bytes"
-      ? removedChars
-      : Math.ceil(
-          (sourceBytes - byteBudget) / APPROX_BYTES_PER_TOKEN,
-        );
   return {
-    text: `${left}…${removed} ${markerUnit} truncated…${right}`,
+    text: `${left}…${removedChars} chars truncated…${right}`,
     truncated: true,
   };
 }
@@ -166,15 +151,11 @@ export function formatCodexTruncatedOutput(
   const formatted =
     `Warning: truncated output (original token count: ${approxTokenCount(content)})\n` +
     `Total output lines: ${lineCount(content)}\n\n${truncated.text}`;
-  const rawBudget =
-    policy.type === "bytes"
-      ? policy.limit
-      : policy.limit * APPROX_BYTES_PER_TOKEN;
   return {
     content: formatted,
     truncated: true,
     originalBytes,
-    omittedBytes: Math.max(0, originalBytes - rawBudget),
+    omittedBytes: Math.max(0, originalBytes - policy.limit),
   };
 }
 

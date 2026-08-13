@@ -50,7 +50,6 @@ import {
   CODEX_DEFAULT_OUTPUT_BUDGET_BYTES,
   resolveCodexTruncationPolicy,
   truncateCodexOutput,
-  type CodexTruncationPolicy,
 } from "../src/output-truncation.ts";
 
 const grammarPath = fileURLToPath(new URL("../src/apply-patch.lark", import.meta.url));
@@ -402,12 +401,8 @@ export default function piCodex(pi: ExtensionAPI) {
       : { type: "bytes" as const, limit: budget };
   }
 
-  function truncationUnits(
-    text: string,
-    policy: CodexTruncationPolicy,
-  ): number {
-    const bytes = Buffer.byteLength(text, "utf8");
-    return policy.type === "bytes" ? bytes : Math.ceil(bytes / 4);
+  function truncationUnits(text: string): number {
+    return Buffer.byteLength(text, "utf8");
   }
 
   function latestRemoteCompaction(ctx: { sessionManager: { getBranch(): readonly any[] } }) {
@@ -726,7 +721,7 @@ export default function piCodex(pi: ExtensionAPI) {
       item.type === "text" && typeof item.text === "string" ? [index] : [],
     );
     const units = textIndexes.map((index) =>
-      truncationUnits((event.content[index] as any).text, policy),
+      truncationUnits((event.content[index] as any).text),
     );
     const totalUnits = units.reduce((total, value) => total + value, 0);
     if (totalUnits <= policy.limit) return;
