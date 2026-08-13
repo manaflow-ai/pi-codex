@@ -52,10 +52,6 @@ import {
   resolveCodexTruncationPolicy,
   truncateCodexOutput,
 } from "../src/output-truncation.ts";
-import {
-  classifyActivityOrigin,
-  subagentActivityDetails,
-} from "../src/subagent-origin.ts";
 
 const grammarPath = fileURLToPath(new URL("../src/apply-patch.lark", import.meta.url));
 const applyPatchGrammar = readFileSync(grammarPath, "utf8");
@@ -957,12 +953,6 @@ export default function piCodex(pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (event) => {
-    if (classifyActivityOrigin(event) === "subagent") {
-      Object.assign(event, subagentActivityDetails());
-      for (const message of event.messages) {
-        Object.assign(message, subagentActivityDetails());
-      }
-    }
     retryTurnState = undefined;
   });
   pi.on("turn_start", () => {
