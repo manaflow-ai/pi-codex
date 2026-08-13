@@ -238,7 +238,11 @@ type ApplyPatchDetails = {
 };
 
 function isCodexModel(model: Model<any> | undefined): boolean {
-  return model?.provider === "openai-codex" || /(?:^|[-_.])codex(?:$|[-_.])/.test(model?.id ?? "");
+  // Tool selection follows the wire protocol first, just like remote
+  // compaction. Subrouter and other aliases may not contain "codex" in either
+  // their provider or model id even though they support Codex freeform tools.
+  const modelId = model?.id ?? "";
+  return isOpenAICodexModel(model) || /(?:^|[-_.])codex(?:$|[-_.])/.test(modelId);
 }
 
 function changedPathsFromOutput(output: string): string[] {

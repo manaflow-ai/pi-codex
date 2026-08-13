@@ -395,6 +395,10 @@ test("uses the upstream freeform apply_patch grammar", () => {
 test("recognizes Codex models", () => {
   assert.equal(isCodexModel({ provider: "openai-codex", id: "gpt-5.6-sol" } as never), true);
   assert.equal(isCodexModel({ provider: "openai", id: "gpt-5.3-codex" } as never), true);
+  assert.equal(
+    isCodexModel({ provider: "subrouter", id: "gpt-5.6-sol", api: "openai-codex-responses" } as never),
+    true,
+  );
   assert.equal(isCodexModel({ provider: "openai", id: "gpt-5.4" } as never), false);
   assert.equal(
     supportsCodexFastMode({ provider: "openai-codex", id: "gpt-5.6-sol" } as never),
