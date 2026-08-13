@@ -523,39 +523,62 @@ export function buildReplacementHistory(
 }
 
 function estimateItemTokens(item: unknown): number {
-  if (item && typeof item === "object") {
-    const candidate = item as Record<string, unknown>;
-    if (
-      (candidate.type === "message" ||
-        candidate.role === "user" ||
-        candidate.role === "assistant") &&
-      candidate.content !== undefined
-    ) {
-      const textTokens = textTokenCount(candidate.content);
-      if (textTokens > 0) return textTokens;
-    }
-  }
-  return Math.max(1, Math.ceil(Buffer.byteLength(stableJson(item), "utf8") / 4));
+  const textTokens = textTokenCount(item);
+  const nonTextShape = withoutTextContent(item);
+  const nonTextTokens = Math.ceil(
+    Buffer.byteLength(stableJson(nonTextShape), "utf8") / 4,
+  );
+  return Math.max(1, textTokens + nonTextTokens);
 }
 
-function textTokenCount(value: unknown): number {
+function approximateTextTokens(value: string): number {
+  return Math.ceil(Buffer.byteLength(value, "utf8") / 4);
+}
+
+function isTextContentKey(key: string): boolean {
+  return key === "text" || key === "content";
+}
+
+function textTokenCount(value: unknown, textContent = false): number {
   if (typeof value === "string") {
-    return Math.ceil(Buffer.byteLength(value, "utf8") / 4);
+    return textContent ? approximateTextTokens(value) : 0;
   }
   if (Array.isArray(value)) {
-    return value.reduce((total, entry) => total + textTokenCount(entry), 0);
+    return value.reduce(
+      (total, entry) => total + textTokenCount(entry, textContent),
+      0,
+    );
   }
   if (!value || typeof value !== "object") return 0;
-  const object = value as Record<string, unknown>;
-  return typeof object.text === "string"
-    ? Math.ceil(Buffer.byteLength(object.text, "utf8") / 4)
-    : 0;
+  return Object.entries(value as Record<string, unknown>).reduce(
+    (total, [key, entry]) =>
+      total + textTokenCount(entry, isTextContentKey(key)),
+    0,
+  );
+}
+
+function withoutTextContent(value: unknown, textContent = false): unknown {
+  if (typeof value === "string") return textContent ? "" : value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => withoutTextContent(entry, textContent));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+      key,
+      withoutTextContent(entry, isTextContentKey(key)),
+    ]),
+  );
 }
 
 function isRetainedHistoryItem(item: ResponseItem): boolean {
   const type = typeof item.type === "string" ? item.type : undefined;
   if (type === "compaction" || type === "context_compaction") return true;
   if (type === "agent_message" || type === "agent") {
+    return !isFinalAgentMessage(item) &&
+      estimateItemTokens(item) <= MAX_RETAINED_AGENT_MESSAGE_TOKENS;
+  }
+  if (type === "message" && item.role === "assistant") {
     return !isFinalAgentMessage(item) &&
       estimateItemTokens(item) <= MAX_RETAINED_AGENT_MESSAGE_TOKENS;
   }
@@ -578,64 +601,107 @@ function isFinalAgentMessage(item: ResponseItem): boolean {
   return text?.startsWith("Message Type: FINAL_ANSWER\n") ?? false;
 }
 
+function truncateTextToApproximateTokens(
+  text: string,
+  tokenBudget: number,
+): string | undefined {
+  if (tokenBudget <= 0) return undefined;
+  if (approximateTextTokens(text) <= tokenBudget) return text;
+
+  // truncateCodexText's marker is intentionally outside its payload budget.
+  // Binary-search the byte budget so the complete marked result, not only its
+  // retained halves, fits this approximate token allowance.
+  let lower = 0;
+  let upper = Math.min(
+    Buffer.byteLength(text, "utf8"),
+    tokenBudget * 4,
+  );
+  let best: string | undefined;
+  while (lower <= upper) {
+    const midpoint = Math.floor((lower + upper) / 2);
+    const candidate = truncateCodexText(text, {
+      type: "bytes",
+      limit: midpoint,
+    });
+    if (approximateTextTokens(candidate) <= tokenBudget) {
+      best = candidate;
+      lower = midpoint + 1;
+    } else {
+      upper = midpoint - 1;
+    }
+  }
+  return best;
+}
+
 function truncateRetainedMessage(
   item: ResponseItem,
   remainingTokens: number,
 ): ResponseItem | undefined {
   if (remainingTokens <= 0) return undefined;
   const copy = structuredClone(item);
-  let remaining = remainingTokens;
+  const fixedTokens = Math.max(
+    1,
+    Math.ceil(
+      Buffer.byteLength(stableJson(withoutTextContent(copy)), "utf8") / 4,
+    ),
+  );
+  if (fixedTokens >= remainingTokens) return undefined;
+  let remaining = remainingTokens - fixedTokens;
   let changed = false;
 
   const consumeText = (text: string): string | undefined => {
     if (remaining <= 0) return undefined;
-    const tokens = textTokenCount(text);
+    const tokens = approximateTextTokens(text);
     if (tokens <= remaining) {
       remaining -= tokens;
       return text;
     }
-    const truncated = truncateCodexText(text, {
-      type: "tokens",
-      limit: remaining,
-    });
-    remaining = 0;
+    const truncated = truncateTextToApproximateTokens(text, remaining);
+    if (!truncated) return undefined;
+    remaining -= approximateTextTokens(truncated);
     return truncated || undefined;
   };
 
-  const visit = (value: unknown): unknown => {
-    if (typeof value === "string") return value;
+  const visit = (value: unknown, textContent = false): unknown => {
+    if (typeof value === "string") {
+      if (!textContent) return value;
+      changed = true;
+      return consumeText(value);
+    }
     if (Array.isArray(value)) {
       const next: unknown[] = [];
       for (const entry of value) {
-        if (remaining <= 0) {
-          // Preserve non-text content such as images, but omit more text.
-          if (entry && typeof entry === "object" && "text" in entry) continue;
-          next.push(entry);
-          continue;
-        }
-        next.push(visit(entry));
+        const visited = visit(entry, textContent);
+        if (visited !== undefined) next.push(visited);
       }
       return next;
     }
     if (!value || typeof value !== "object") return value;
     const next: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (key === "text" && typeof entry === "string") {
-        changed = true;
-        const text = consumeText(entry);
-        if (text !== undefined) {
-          next[key] = text;
-        }
-      } else {
-        next[key] = visit(entry);
-      }
+      const visited = visit(entry, isTextContentKey(key));
+      if (visited !== undefined) next[key] = visited;
     }
     return next;
   };
 
   const result = visit(copy);
   if (!changed && estimateItemTokens(result) > remainingTokens) return undefined;
-  if (result && typeof result === "object") return result as ResponseItem;
+  if (!result || typeof result !== "object") return undefined;
+  const originalContent = item.content;
+  const retainedContent = (result as ResponseItem).content;
+  if (
+    originalContent !== undefined &&
+    (retainedContent === undefined ||
+      (Array.isArray(originalContent) &&
+        Array.isArray(retainedContent) &&
+        retainedContent.length === 0))
+  ) {
+    return undefined;
+  }
+  if (estimateItemTokens(result) <= remainingTokens) {
+    return result as ResponseItem;
+  }
   return undefined;
 }
 

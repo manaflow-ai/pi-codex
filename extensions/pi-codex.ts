@@ -818,7 +818,7 @@ export default function piCodex(pi: ExtensionAPI) {
     const output = buildReplacementHistory(body.input, compaction);
     const retainedContext = retainedContextItems(
       model,
-      (event as any).branchEntries ?? [],
+      ctx.sessionManager.getBranch(),
       event.preparation.firstKeptEntryId,
     );
     if (!retainedContext) {
