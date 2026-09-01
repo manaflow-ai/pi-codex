@@ -69,6 +69,9 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body || '' }}
           COMMENT_USER_TYPE: ${{ github.event.comment.user.type || '' }}
           COMMENT_USER_ID: "${{ github.event.comment.user.id || '' }}"
+          COMMENT_USER_LOGIN: "${{ github.event.comment.user.login || '' }}"
+          COMMENT_ASSOCIATION: "${{ github.event.comment.author_association || '' }}"
+          PR_AUTHOR_ID: "${{ github.event.issue.user.id || '' }}"
           COMMENT_ISSUE_STATE: "${{ github.event.issue.state || '' }}"
           COMMENT_IS_PULL_REQUEST: "${{ github.event.issue.pull_request != null }}"
         run: |
@@ -96,6 +99,8 @@ jobs:
                   "${COMMENT_IS_PULL_REQUEST}" != "true" ||
                   "${COMMENT_USER_TYPE}" != "User" ]] ||
                ! [[ "${COMMENT_USER_ID}" =~ ^[1-9][0-9]*$ ]] ||
+               [[ -z "${COMMENT_USER_LOGIN}" ||
+                  "$(printf '%s' "${COMMENT_USER_LOGIN}" | tr '[:upper:]' '[:lower:]')" == *"[bot]" ]] ||
                [[ "${COMMENT_BODY}" != "recheck" &&
                   "${COMMENT_BODY}" != "I have read the CLA Document and I hereby sign the CLA" ]]; then
               if ! reject_trigger; then
@@ -103,7 +108,18 @@ jobs:
               fi
               exit 0
             fi
-            emit_admission true
+            if [[ "${COMMENT_BODY}" == "recheck" ]]; then
+              if [[ "${COMMENT_USER_ID}" == "${PR_AUTHOR_ID}" ]]; then
+                emit_admission true
+              else
+                case "${COMMENT_ASSOCIATION}" in
+                  OWNER|MEMBER|COLLABORATOR) emit_admission true ;;
+                  *) reject_trigger ;;
+                esac
+              fi
+            else
+              emit_admission true
+            fi
           elif [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
             case "${EVENT_ACTION}" in
               opened|reopened|synchronize|edited) ;;
@@ -217,7 +233,10 @@ jobs:
     # issue_comment separate from pull_request_target lifecycle validation.
     # The merged-only lock has its own per-PR queue.
     concurrency:
-      group: "cla-signatures-${{ github.repository }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}"
+      # Every signer writes the same repository-wide ledger. A repository-wide
+      # queue is required because per-PR queues permit two writers to race
+      # between the action's read and its commit.
+      group: "cla-signatures-${{ github.repository }}"
       cancel-in-progress: false
     # Keep the token scoped to the GitHub API operations used by this job.
     permissions:
@@ -474,6 +493,8 @@ jobs:
     # refreshes the PR check after a signature comment.
     if: >-
       always() &&
+      needs.CLACommentGate.result == 'success' &&
+      needs.CLACommentGate.outputs.admitted == 'true' &&
       (
         (
           github.event_name == 'pull_request_target' &&
@@ -507,6 +528,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           COMMENT_BODY: ${{ github.event.comment.body || '' }}
           COMMENT_ASSOCIATION: ${{ github.event.comment.author_association || '' }}
+          COMMENT_USER_ID: ${{ github.event.comment.user.id || '' }}
+          PR_AUTHOR_ID: ${{ github.event.issue.user.id || '' }}
           GATE_RESULT: ${{ needs.CLACommentGate.result }}
           GATE_ADMITTED: ${{ needs.CLACommentGate.outputs.admitted || '' }}
           PREFLIGHT_RESULT: ${{ needs.CLASignerPreflight.result }}
@@ -530,15 +553,16 @@ jobs:
           fi
           if [[ "${EVENT_NAME}" == "issue_comment" &&
                 "${COMMENT_BODY}" == "recheck" ]]; then
-            case "${COMMENT_ASSOCIATION}" in
-              OWNER|MEMBER|COLLABORATOR)
-                [[ "${WRITER_RESULT}" == "success" ]] ||
-                  fail "The trusted CLA recheck did not complete successfully."
-                ;;
-              *)
-                echo "::notice::Ignoring an untrusted CLA recheck; no privileged signer was started."
-                ;;
-            esac
+            if [[ "${COMMENT_USER_ID}" == "${PR_AUTHOR_ID}" ]]; then
+              :
+            else
+              case "${COMMENT_ASSOCIATION}" in
+                OWNER|MEMBER|COLLABORATOR) : ;;
+                *) fail "The CLA recheck commenter is not authorized." ;;
+              esac
+            fi
+            [[ "${WRITER_RESULT}" == "success" ]] ||
+              fail "The trusted CLA recheck did not complete successfully."
             exit 0
           fi
           [[ "${WRITER_RESULT}" == "success" ]] ||
