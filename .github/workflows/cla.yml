@@ -720,7 +720,7 @@ jobs:
           fi
           [[ "$EVENT_OPENER_ID" =~ ^[1-9][0-9]*$ ]] || fail "CLA lock event has no valid opener ID."
 
-          if ! live_pr="$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}" --jq '{number: .number, state: .state, merged: .merged, base_ref: .base.ref, base_repo: .base.repo.full_name, base_repo_id: .base.repo.id, head_sha: .head.sha, head_ref: .head.ref, head_repo: (.head.repo | if . == null then null else {full_name: .full_name, id: .id} end), opener_login: .user.login, opener_id: .user.id}' 2>/dev/null)"; then
+          if ! live_pr="$(gh api "repos/${GH_REPO}/pulls/${PR_NUMBER}" --jq '{number: .number, state: .state, merged: (.merged_at != null), base_ref: .base.ref, base_repo: .base.repo.full_name, base_repo_id: .base.repo.id, head_sha: .head.sha, head_ref: .head.ref, head_repo: (.head.repo | if . == null then null else {full_name: .full_name, id: .id} end), opener_login: .user.login, opener_id: .user.id}' 2>/dev/null)"; then
             fail "CLA lock step could not read live pull request metadata."
           fi
           # GitHub can advance or delete a source branch after merge. Validate
